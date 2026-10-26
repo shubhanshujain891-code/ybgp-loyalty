@@ -22,9 +22,12 @@ export function generateRandomToken(bytes: number = 24): string {
 /**
  * Generate customer loyalty QR bearer token with prefix
  */
+/**
+ * Generate customer loyalty QR bearer token with 128-bit cryptographic entropy (16 random bytes)
+ */
 export function generateQrToken(): string {
-  const randomHex = crypto.randomBytes(12).toString('hex').toUpperCase();
-  return `YBGP-CRD-${randomHex.slice(0, 4)}-${randomHex.slice(4, 8)}-${randomHex.slice(8, 12)}`;
+  const randomHex = crypto.randomBytes(16).toString('hex').toUpperCase();
+  return `YBGP-CRD-${randomHex.slice(0, 4)}-${randomHex.slice(4, 8)}-${randomHex.slice(8, 12)}-${randomHex.slice(12, 16)}`;
 }
 
 /**
@@ -54,6 +57,15 @@ export function normalizeIndianPhone(input: string): string {
 }
 
 /**
+ * Strictly validate Indian mobile number format (+91 followed by 10 digits starting with 6-9)
+ */
+export function isValidIndianPhone(input: string): boolean {
+  if (!input) return false;
+  const norm = normalizeIndianPhone(input);
+  return /^\+91[6-9]\d{9}$/.test(norm);
+}
+
+/**
  * Mask phone number for privacy (+91 ••••• ••123)
  */
 export function maskPhone(phone: string): string {
@@ -63,6 +75,29 @@ export function maskPhone(phone: string): string {
     return `+91 ••••• ••${last3}`;
   }
   return phone;
+}
+
+/**
+ * Enforce enterprise password complexity:
+ * Minimum 12 characters, with uppercase, lowercase, digit, and symbol.
+ */
+export function validatePasswordStrength(password: string): { valid: boolean; error?: string } {
+  if (!password || password.length < 12) {
+    return { valid: false, error: 'Password must be at least 12 characters long.' };
+  }
+  if (!/[A-Z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one uppercase letter (A-Z).' };
+  }
+  if (!/[a-z]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one lowercase letter (a-z).' };
+  }
+  if (!/[0-9]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one numeric digit (0-9).' };
+  }
+  if (!/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?~`]/.test(password)) {
+    return { valid: false, error: 'Password must contain at least one special character/symbol.' };
+  }
+  return { valid: true };
 }
 
 /**
@@ -150,8 +185,8 @@ export function timingSafeMatch(a: string, b: string): boolean {
 }
 
 /**
- * Verify payment webhook HMAC signature (Razorpay/Stripe compatible)
- * Fails closed if signature is missing or incorrect.
+ * Generic webhook signature verification (HMAC SHA-256)
+ * Fails closed if signature is missing or secret is not provided.
  */
 export function verifyWebhookSignature(rawBody: string | Buffer, signatureHeader: string | undefined, secret: string): boolean {
   if (!signatureHeader || !secret) {
@@ -165,6 +200,64 @@ export function verifyWebhookSignature(rawBody: string | Buffer, signatureHeader
     // Handle possible 'sha256=' or 'v1=' prefix in signatureHeader
     const cleanHeader = signatureHeader.replace(/^sha256=|^v1=/, '').trim();
     return timingSafeMatch(cleanHeader, expectedSignature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Razorpay specific webhook signature verification:
+ * Computes HMAC SHA-256 over raw request body using razorpay webhook secret.
+ */
+export function verifyRazorpayWebhook(rawBody: string | Buffer, signature: string | undefined, secret: string): boolean {
+  if (!signature || !secret) return false;
+  try {
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8'));
+    const expected = hmac.digest('hex');
+    return timingSafeMatch(signature.trim(), expected);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Stripe specific webhook signature verification:
+ * Validates 'stripe-signature' header in 't={timestamp},v1={signature}' format
+ * Computes HMAC SHA-256 over `${timestamp}.${rawBody}`
+ * Enforces timestamp freshness tolerance (default: 300 seconds)
+ */
+export function verifyStripeWebhook(
+  rawBody: string | Buffer,
+  sigHeader: string | undefined,
+  secret: string,
+  toleranceSeconds: number = 300
+): boolean {
+  if (!sigHeader || !secret) return false;
+  try {
+    const parts = sigHeader.split(',').reduce<Record<string, string>>((acc, item) => {
+      const [k, v] = item.split('=');
+      if (k && v) acc[k.trim()] = v.trim();
+      return acc;
+    }, {});
+
+    const timestamp = parts['t'];
+    const signature = parts['v1'];
+    if (!timestamp || !signature) return false;
+
+    // Check timestamp tolerance
+    const tsNumber = parseInt(timestamp, 10);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (isNaN(tsNumber) || Math.abs(nowSec - tsNumber) > toleranceSeconds) {
+      return false; // Timestamp outside acceptable tolerance window
+    }
+
+    const payload = `${timestamp}.${typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8')}`;
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(payload);
+    const expected = hmac.digest('hex');
+
+    return timingSafeMatch(signature, expected);
   } catch {
     return false;
   }

@@ -8,7 +8,7 @@ ENVIRONMENT = "production"
 YBGP_DOMAIN = "https://ybgp.in"
 DEFAULT_TIMEZONE = "Asia/Kolkata"
 CURRENCY_SYMBOL = "₹"
-SMS_PROVIDER_MODE = "gateway"
+SMS_PROVIDER = "gateway"
 
 # Cloudflare D1 Relational Database Binding
 [[d1_databases]]
@@ -17,6 +17,9 @@ database_name = "ybgp-loyalty-production"
 database_id = "ybgp-d1-prod-001"
 migrations_dir = "src/migrations"
 
-# Cloudflare Pages / Static Assets configuration
-[site]
-bucket = "./dist"
+# Cloudflare Workers Static Assets Configuration
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+html_handling = "auto-trailing-slash"
+not_found_handling = "single-page-application"

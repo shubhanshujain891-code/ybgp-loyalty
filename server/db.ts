@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateId, generateQrToken, hashSha256, generateSalt, hashPassword } from './security';
+import { generateId, generateQrToken, hashSha256, generateSalt, hashPassword, validatePasswordStrength, timingSafeMatch } from './security';
 import { YBGP_CONFIG } from '../src/config/ybgp';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -17,13 +17,15 @@ const __dirname = path.dirname(__filename);
 
 export class ServerDatabase {
   public db: DatabaseSync;
+  public dbPath: string;
 
-  constructor(dbPath: string = 'database.sqlite') {
+  constructor(dbPath: string = 'database.sqlite', options?: { enableDemoSeed?: boolean }) {
+    this.dbPath = dbPath;
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA foreign_keys = ON;');
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.runMigrations();
-    this.seedInitialData();
+    this.seedInitialData(options?.enableDemoSeed);
   }
 
   private runMigrations(): void {
@@ -95,7 +97,79 @@ export class ServerDatabase {
     }
   }
 
-  private seedInitialData(): void {
+  public bootstrapAdmin(data: {
+    secret?: string;
+    name: string;
+    email: string;
+    password: string;
+    phone?: string;
+  }): { id: string; email: string; name: string } {
+    const requiredSecret = process.env.BOOTSTRAP_ADMIN_SECRET;
+    if (process.env.NODE_ENV === 'production' && !requiredSecret) {
+      throw new Error('BOOTSTRAP_ADMIN_SECRET must be configured in production environment to bootstrap initial administrator.');
+    }
+
+    if (requiredSecret && (!data.secret || !timingSafeMatch(data.secret, requiredSecret))) {
+      throw new Error('Invalid or missing bootstrap administrative secret.');
+    }
+
+    const existingAdmin = this.queryOne<{ id: string }>(
+      "SELECT id FROM users WHERE role = 'platform_admin' LIMIT 1;"
+    );
+    if (existingAdmin && !data.secret) {
+      throw new Error('A platform administrator has already been bootstrapped.');
+    }
+
+    const strength = validatePasswordStrength(data.password);
+    if (!strength.valid) {
+      throw new Error(`Password complexity requirement not met: ${strength.error}`);
+    }
+
+    const salt = generateSalt(16);
+    const hash = hashPassword(data.password, salt);
+    const adminId = generateId('usr_admin');
+
+    this.execute(
+      `INSERT INTO users (id, name, email, phone, role, password_hash, password_salt, account_status)
+       VALUES (?, ?, ?, ?, 'platform_admin', ?, ?, 'active');`,
+      [adminId, data.name.trim(), data.email.trim().toLowerCase(), data.phone || '+919999999999', hash, salt]
+    );
+
+    this.execute(
+      `INSERT INTO audit_logs (id, business_id, user_id, user_name, actor_type, action, entity_type, entity_id, details)
+       VALUES (?, NULL, ?, ?, 'admin', 'SYSTEM_BOOTSTRAPPED_ADMIN', 'user', ?, ?);`,
+      [
+        generateId('log'),
+        adminId,
+        `${data.name.trim()} (Platform Admin)`,
+        adminId,
+        `Bootstrapped initial platform administrator (${data.email.trim()}).`,
+      ]
+    );
+
+    return {
+      id: adminId,
+      email: data.email.trim().toLowerCase(),
+      name: data.name.trim(),
+    };
+  }
+
+  private seedInitialData(explicitEnable?: boolean): void {
+    // If it's a persistent production database, strictly refuse and fail safe
+    if (process.env.NODE_ENV === 'production' && this.dbPath !== ':memory:') {
+      if (process.env.ENABLE_DEMO_SEED === 'true' || explicitEnable) {
+        throw new Error('FATAL: Demo data seeding is strictly prohibited in production mode (NODE_ENV=production). Refusing to initialize with demo credentials.');
+      }
+      return; // Safe fail-closed: do not seed demo credentials in production
+    }
+
+    // In-memory test databases (:memory:) or non-production with demo seed enabled
+    const isTestDb = this.dbPath === ':memory:';
+    const shouldSeed = isTestDb || explicitEnable || process.env.ENABLE_DEMO_SEED === 'true' || process.env.NODE_ENV === 'test';
+    if (!shouldSeed) {
+      return;
+    }
+
     const existing = this.queryOne<{ count: number }>('SELECT count(*) as count FROM businesses;');
     if (existing && existing.count > 0) {
       return; // Already initialized

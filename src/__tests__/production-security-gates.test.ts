@@ -43,6 +43,9 @@ describe('YBGP P0 Security Gates & Release Hardening Suite', () => {
   afterEach(() => {
     process.env.NODE_ENV = originalEnv;
     delete process.env.PAYMENT_WEBHOOK_SECRET;
+    delete process.env.RAZORPAY_WEBHOOK_SECRET;
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+    delete process.env.BOOTSTRAP_ADMIN_SECRET;
     delete process.env.ALLOW_DEV_AUTH_BYPASS;
   });
 
@@ -379,6 +382,214 @@ describe('YBGP P0 Security Gates & Release Hardening Suite', () => {
 
       expect(res.status).toBe(403);
       expect(res.body.error).toContain('cashier role is not authorized');
+    });
+  });
+
+  // =========================================================================
+  // P0-7: ADMIN BOOTSTRAP SECURITY & PASSWORD COMPLEXITY
+  // =========================================================================
+
+  describe('P0-7: Platform Admin Bootstrap Security & Password Complexity', () => {
+    it('7.1 Rejects bootstrap admin creation if password does not meet enterprise complexity', async () => {
+      process.env.BOOTSTRAP_ADMIN_SECRET = 'SuperSecureBootstrapKey2026!';
+
+      const res = await request(app)
+        .post('/api/v1/auth/bootstrap-admin')
+        .send({
+          bootstrapSecret: 'SuperSecureBootstrapKey2026!',
+          name: 'Platform Engineer',
+          email: 'eng@ybgp.in',
+          password: 'weak', // Too short, no uppercase, no numbers, no symbols
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Password complexity');
+    });
+
+    it('7.2 Rejects bootstrap admin request when secret is incorrect', async () => {
+      process.env.BOOTSTRAP_ADMIN_SECRET = 'SuperSecureBootstrapKey2026!';
+
+      const res = await request(app)
+        .post('/api/v1/auth/bootstrap-admin')
+        .send({
+          bootstrapSecret: 'WrongSecretKey',
+          name: 'Platform Engineer',
+          email: 'eng2@ybgp.in',
+          password: 'ValidPassword@2026#Secure',
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('Invalid or missing bootstrap');
+    });
+
+    it('7.3 Successfully provisions initial administrator with valid secret and strong password', async () => {
+      process.env.BOOTSTRAP_ADMIN_SECRET = 'SuperSecureBootstrapKey2026!';
+
+      const res = await request(app)
+        .post('/api/v1/auth/bootstrap-admin')
+        .send({
+          bootstrapSecret: 'SuperSecureBootstrapKey2026!',
+          name: 'Chief Security Officer',
+          email: 'cso@ybgp.in',
+          password: 'ValidPassword@2026#Secure',
+        });
+
+      expect(res.status).toBe(201);
+      expect(res.body.success).toBe(true);
+      expect(res.body.admin.email).toBe('cso@ybgp.in');
+    });
+  });
+
+  // =========================================================================
+  // P0-8: HIGH-ENTROPY QR TOKEN ROTATION
+  // =========================================================================
+
+  describe('P0-8: High-Entropy QR Token Lifecycle & Rotation', () => {
+    it('8.1 Successfully rotates customer QR card token, revoking prior token', async () => {
+      const ownerSession = authService.createSession('usr_owner_chai');
+
+      const res = await request(app)
+        .post('/api/v1/merchant/card/rotate-qr')
+        .set('Authorization', `Bearer ${ownerSession.token}`)
+        .send({ cardId: 'crd_ananya_chai' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.newQrToken).toMatch(/^YBGP-CRD-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/);
+
+      // Verify that old token is marked revoked in database
+      const revoked = db.query(
+        'SELECT token_hash, revoked_at FROM qr_tokens WHERE card_id = ? AND revoked_at IS NOT NULL;',
+        ['crd_ananya_chai']
+      );
+      expect(revoked.length).toBeGreaterThan(0);
+    });
+
+    it('8.2 Rejects QR card rotation from unauthorized cashier', async () => {
+      const cashierSession = authService.createSession('usr_cashier_chai');
+
+      const res = await request(app)
+        .post('/api/v1/merchant/card/rotate-qr')
+        .set('Authorization', `Bearer ${cashierSession.token}`)
+        .send({ cardId: 'crd_ananya_chai' });
+
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // =========================================================================
+  // P0-9: MULTI-PROVIDER WEBHOOK VERIFICATION (Razorpay & Stripe)
+  // =========================================================================
+
+  describe('P0-9: Multi-Provider Webhook Verification (Razorpay & Stripe)', () => {
+    const webhookSecret = 'test_whsec_secret_key_2026';
+
+    it('9.1 Verifies valid Razorpay HMAC SHA256 webhook and upgrades subscription', async () => {
+      process.env.RAZORPAY_WEBHOOK_SECRET = webhookSecret;
+
+      const payload = JSON.stringify({
+        event: 'payment.captured',
+        id: 'rzp_evt_test_123',
+        payload: {
+          payment: {
+            entity: {
+              id: 'pay_test_001',
+              notes: {
+                businessId: 'biz_chaico',
+                planId: 'plan_pro',
+              },
+            },
+          },
+        },
+      });
+
+      const signature = crypto.createHmac('sha256', webhookSecret).update(payload).digest('hex');
+
+      const res = await request(app)
+        .post('/api/v1/webhooks/razorpay')
+        .set('x-razorpay-signature', signature)
+        .set('Content-Type', 'application/json')
+        .send(payload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // Verify subscription upgraded
+      const sub = db.queryOne<{ plan_id: string }>(
+        'SELECT plan_id FROM subscriptions WHERE business_id = ?;',
+        ['biz_chaico']
+      );
+      expect(sub?.plan_id).toBe('plan_pro');
+    });
+
+    it('9.2 Rejects forged Razorpay webhook signature', async () => {
+      process.env.RAZORPAY_WEBHOOK_SECRET = webhookSecret;
+
+      const payload = JSON.stringify({ event: 'payment.captured', id: 'rzp_fake_001' });
+
+      const res = await request(app)
+        .post('/api/v1/webhooks/razorpay')
+        .set('x-razorpay-signature', 'forged_invalid_signature_hex')
+        .set('Content-Type', 'application/json')
+        .send(payload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Invalid Razorpay webhook signature');
+    });
+
+    it('9.3 Verifies valid Stripe webhook signature with timestamp freshness', async () => {
+      process.env.STRIPE_WEBHOOK_SECRET = webhookSecret;
+
+      const payload = JSON.stringify({
+        type: 'checkout.session.completed',
+        id: 'evt_stripe_test_456',
+        data: {
+          object: {
+            client_reference_id: 'biz_royalshave',
+            metadata: {
+              planId: 'plan_growth',
+            },
+          },
+        },
+      });
+
+      const nowSec = Math.floor(Date.now() / 1000);
+      const signature = crypto.createHmac('sha256', webhookSecret).update(`${nowSec}.${payload}`).digest('hex');
+      const stripeHeader = `t=${nowSec},v1=${signature}`;
+
+      const res = await request(app)
+        .post('/api/v1/webhooks/stripe')
+        .set('stripe-signature', stripeHeader)
+        .set('Content-Type', 'application/json')
+        .send(payload);
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+
+      // Verify subscription updated
+      const sub = db.queryOne<{ plan_id: string }>(
+        'SELECT plan_id FROM subscriptions WHERE business_id = ?;',
+        ['biz_royalshave']
+      );
+      expect(sub?.plan_id).toBe('plan_growth');
+    });
+
+    it('9.4 Rejects replay attack with expired Stripe webhook timestamp (> 300s)', async () => {
+      process.env.STRIPE_WEBHOOK_SECRET = webhookSecret;
+
+      const payload = JSON.stringify({ type: 'checkout.session.completed', id: 'evt_old_001' });
+      const oldTimestamp = Math.floor(Date.now() / 1000) - 600; // 10 minutes ago
+      const signature = crypto.createHmac('sha256', webhookSecret).update(`${oldTimestamp}.${payload}`).digest('hex');
+      const stripeHeader = `t=${oldTimestamp},v1=${signature}`;
+
+      const res = await request(app)
+        .post('/api/v1/webhooks/stripe')
+        .set('stripe-signature', stripeHeader)
+        .set('Content-Type', 'application/json')
+        .send(payload);
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Invalid Stripe webhook signature or expired timestamp');
     });
   });
 });

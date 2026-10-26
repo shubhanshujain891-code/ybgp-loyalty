@@ -35,9 +35,9 @@ const MAX_ATTEMPTS = 4;
 
 export const smsService = {
   /**
-   * Request OTP for Indian mobile number
+   * Request OTP for Indian mobile number via server
    */
-  async requestOtp(phone: string, businessName: string): Promise<OtpRequestResult> {
+  async requestOtp(phone: string, businessName: string, businessId?: string): Promise<OtpRequestResult> {
     const norm = normalizeIndianPhone(phone);
     if (!norm || norm.length < 13) {
       return {
@@ -48,40 +48,53 @@ export const smsService = {
       };
     }
 
-    const now = Date.now();
-    const existing = otpStore.get(norm);
+    try {
+      const response = await fetch('/api/v1/public/loyalty/otp/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          phone: norm,
+          businessId: businessId || 'biz_chaico',
+          businessName,
+        }),
+      });
 
-    // Rate limiting: cooldown check
-    if (existing && now - existing.lastSentAt < RESEND_COOLDOWN_MS) {
-      const waitSec = Math.ceil((RESEND_COOLDOWN_MS - (now - existing.lastSentAt)) / 1000);
+      const data = await response.json();
+      if (!response.ok) {
+        return {
+          success: false,
+          message: data.error || data.message || 'Failed to send OTP code.',
+          phoneNormalized: norm,
+          expiresInSeconds: 0,
+        };
+      }
+
       return {
-        success: false,
-        message: `Please wait ${waitSec}s before requesting a new OTP code.`,
+        success: true,
+        message: data.message || `OTP sent successfully to ${norm.slice(0, 6)}••••${norm.slice(-3)}.`,
         phoneNormalized: norm,
-        expiresInSeconds: Math.ceil((existing.expiresAt - now) / 1000),
+        simulatedOtp: data.simulatedOtp,
+        expiresInSeconds: data.expiresInSeconds || 300,
+      };
+    } catch {
+      // In production mode, never simulate
+      const isProd = import.meta.env.PROD;
+      if (isProd) {
+        return {
+          success: false,
+          message: 'Unable to reach SMS gateway server. Please retry shortly.',
+          phoneNormalized: norm,
+          expiresInSeconds: 0,
+        };
+      }
+      return {
+        success: true,
+        message: `OTP sent via SMS to ${norm.slice(0, 6)}••••${norm.slice(-3)}.`,
+        phoneNormalized: norm,
+        simulatedOtp: '123456',
+        expiresInSeconds: 300,
       };
     }
-
-    // Generate 6-digit OTP
-    const generatedOtp = Math.floor(100000 + Math.random() * 900000).toString();
-
-    otpStore.set(norm, {
-      phone: norm,
-      otp: generatedOtp,
-      expiresAt: now + OTP_EXPIRY_MS,
-      attempts: 0,
-      lastSentAt: now,
-    });
-
-    console.log(`[YBGP SMS Service] OTP for ${norm} (${businessName}): ${generatedOtp}`);
-
-    return {
-      success: true,
-      message: `OTP sent successfully via SMS to ${norm.slice(0, 6)}••••${norm.slice(-3)}.`,
-      phoneNormalized: norm,
-      simulatedOtp: generatedOtp,
-      expiresInSeconds: 300,
-    };
   },
 
   /**

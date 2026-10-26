@@ -19,12 +19,31 @@ import {
   hashPassword,
   verifyPassword,
   verifyWebhookSignature,
+  verifyRazorpayWebhook,
+  verifyStripeWebhook,
   generateSecureOtp,
+  isValidIndianPhone,
+  validatePasswordStrength,
 } from './security';
+import { smsGateway } from './sms-gateway';
 import { YBGP_CONFIG } from '../src/config/ybgp';
 
 export function createApiRouter(db: ServerDatabase, authService: AuthService): Router {
   const router = Router();
+
+  // Production Security Headers Middleware
+  router.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    res.setHeader(
+      'Content-Security-Policy',
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' https:;"
+    );
+    res.setHeader('Permissions-Policy', 'geolocation=(), camera=(self), microphone=()');
+    next();
+  });
 
   // Helper: Structured Error Response
   const sendError = (res: Response, status: number, message: string) => {
@@ -62,6 +81,41 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
   // =========================================================================
   // 1. AUTHENTICATION ENDPOINTS (Strict Password Verification & RBAC)
   // =========================================================================
+
+  /**
+   * POST /api/v1/auth/bootstrap-admin
+   * Secure first-run platform admin provisioning or recovery via BOOTSTRAP_ADMIN_SECRET.
+   * Requires strict enterprise password strength (12+ chars, mixed case, numbers, symbols).
+   */
+  router.post('/auth/bootstrap-admin', (req: Request, res: Response) => {
+    const { bootstrapSecret, name, email, password, phone } = req.body;
+
+    if (!name || !email || !password) {
+      return sendError(res, 400, 'Name, email, and password are required.');
+    }
+
+    try {
+      const admin = db.bootstrapAdmin({
+        secret: bootstrapSecret,
+        name,
+        email,
+        password,
+        phone,
+      });
+
+      return res.status(201).json({
+        success: true,
+        message: 'Platform administrator successfully provisioned.',
+        admin,
+      });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Admin bootstrap failed.';
+      const status = msg.includes('configured in production') ||
+                     msg.includes('Invalid or missing') ||
+                     msg.includes('already been bootstrapped') ? 403 : 400;
+      return sendError(res, status, msg);
+    }
+  });
 
   /**
    * POST /api/v1/auth/login
@@ -225,27 +279,42 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
   /**
    * POST /api/v1/public/loyalty/otp/request
    * Secure OTP challenge for customer registration/recovery
+   * Production-safe: strict 60s cooldown, hourly rate limits, external gateway dispatch,
+   * fail-closed semantics when unconfigured in production.
    */
-  router.post('/public/loyalty/otp/request', (req: Request, res: Response) => {
+  router.post('/public/loyalty/otp/request', async (req: Request, res: Response) => {
     const { phone, businessId } = req.body;
-    const norm = normalizeIndianPhone(phone);
 
-    if (!norm || norm.length !== 13) {
-      return sendError(res, 400, 'Please provide a valid 10-digit Indian mobile number (+91).');
+    if (!phone || !isValidIndianPhone(phone)) {
+      return sendError(res, 400, 'Please provide a valid 10-digit Indian mobile number (+91 6-9XXXXXXXX).');
     }
 
+    const norm = normalizeIndianPhone(phone);
     const business = db.queryOne<{ id: string; name: string }>('SELECT id, name FROM businesses WHERE id = ?;', [businessId]);
     if (!business) {
       return sendError(res, 404, 'Business not found.');
     }
 
-    // Check rate limiting (at most 1 active challenge within 30 seconds)
-    const existing = db.queryOne<{ id: string; attempts: number; created_at: string }>(
-      `SELECT id, attempts, created_at FROM otp_challenges
-       WHERE phone_normalized = ? AND business_id = ? AND expires_at > CURRENT_TIMESTAMP AND verified_at IS NULL
+    // Rate Limiting 1: 60-second cooldown per phone
+    const recentCooldown = db.queryOne<{ id: string }>(
+      `SELECT id FROM otp_challenges
+       WHERE phone_normalized = ? AND created_at > datetime('now', '-60 seconds')
        ORDER BY created_at DESC LIMIT 1;`,
-      [norm, businessId]
+      [norm]
     );
+    if (recentCooldown) {
+      return sendError(res, 429, 'Please wait 60 seconds before requesting a new OTP code.');
+    }
+
+    // Rate Limiting 2: Maximum 5 OTP attempts per phone per hour
+    const hourlyAttempts = db.queryOne<{ count: number }>(
+      `SELECT count(*) as count FROM otp_challenges
+       WHERE phone_normalized = ? AND created_at > datetime('now', '-1 hour');`,
+      [norm]
+    );
+    if (hourlyAttempts && hourlyAttempts.count >= 5) {
+      return sendError(res, 429, 'Hourly OTP request limit exceeded for this mobile number. Please try again later.');
+    }
 
     // Generate 6-digit OTP code using cryptographically secure random generator
     const rawOtp = generateSecureOtp();
@@ -253,13 +322,27 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
     const challengeId = generateId('otp');
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5 min expiry
 
+    // Dispatch via server SMS gateway (fails closed in production if unconfigured)
+    let sendResult;
+    try {
+      sendResult = await smsGateway.sendOtp({
+        phone: norm,
+        otpCode: rawOtp,
+        businessName: business.name,
+      });
+    } catch (gatewayErr: unknown) {
+      const msg = gatewayErr instanceof Error ? gatewayErr.message : 'SMS gateway error';
+      // In production or when gateway is requested, unconfigured or failed SMS gateway fails closed with 503
+      return sendError(res, 503, `SMS service unavailable: ${msg}`);
+    }
+
     db.execute(
       `INSERT INTO otp_challenges (id, phone_normalized, business_id, otp_hash, purpose, expires_at)
        VALUES (?, ?, ?, ?, 'registration', ?);`,
       [challengeId, norm, businessId, otpHash, expiresAt]
     );
 
-    const isProduction = process.env.NODE_ENV === 'production' && process.env.VITE_SMS_PROVIDER_MODE === 'gateway';
+    const isProduction = process.env.NODE_ENV === 'production';
 
     return res.json({
       success: true,
@@ -267,7 +350,7 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       challengeId,
       expiresInSeconds: 300,
       // Security rule: NEVER return simulated OTP in production mode!
-      simulatedOtp: isProduction ? undefined : rawOtp,
+      simulatedOtp: isProduction ? undefined : sendResult.simulatedOtp,
     });
   });
 
@@ -305,8 +388,12 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
     // Hash user-entered OTP and compare with timing-safe comparison
     const enteredHash = hashSha256(otp.trim(), norm);
     if (enteredHash !== challenge.otp_hash) {
+      const nextAttempts = challenge.attempts + 1;
       db.execute('UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = ?;', [challenge.id]);
-      return sendError(res, 400, `Incorrect verification code. ${challenge.max_attempts - (challenge.attempts + 1)} attempts remaining.`);
+      if (nextAttempts >= challenge.max_attempts) {
+        return sendError(res, 429, 'Too many incorrect attempts. Please request a new code.');
+      }
+      return sendError(res, 400, `Incorrect verification code. ${challenge.max_attempts - nextAttempts} attempts remaining.`);
     }
 
     // Atomic consumption of OTP challenge: prevents race condition / replay attacks
@@ -803,6 +890,20 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       const staffUser = req.user!;
       const businessId = req.businessId!;
 
+      const idempotencyKey = (req.headers['idempotency-key'] ||
+        req.headers['x-idempotency-key'] ||
+        req.body.idempotencyKey) as string | undefined;
+
+      if (idempotencyKey) {
+        const existing = db.queryOne<{ status_code: number; response_body: string }>(
+          'SELECT status_code, response_body FROM idempotency_keys WHERE idempotency_key = ? AND business_id = ?;',
+          [idempotencyKey, businessId]
+        );
+        if (existing) {
+          return res.status(existing.status_code).json(JSON.parse(existing.response_body));
+        }
+      }
+
       try {
         const result = db.transaction(() => {
           // Lock entitlement for redemption
@@ -911,9 +1012,92 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
           };
         });
 
+        if (idempotencyKey) {
+          db.execute(
+            "INSERT INTO idempotency_keys (idempotency_key, business_id, action, status_code, response_body) VALUES (?, ?, 'reward_redemption', 200, ?);",
+            [idempotencyKey, businessId, JSON.stringify(result)]
+          );
+        }
+
         return res.json(result);
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Redemption failed';
+        return sendError(res, 400, msg);
+      }
+    }
+  );
+
+  /**
+   * POST /api/v1/merchant/card/rotate-qr
+   * Securely rotate customer card QR bearer token with 128-bit entropy
+   * Invalidates old token in qr_tokens registry and sets loyalty_cards.qr_token_raw = NULL
+   */
+  router.post(
+    '/merchant/card/rotate-qr',
+    requireAuth(authService),
+    requireRole(['owner', 'manager', 'platform_admin']),
+    requireTenant,
+    (req: AuthenticatedRequest, res: Response) => {
+      const { cardId } = req.body;
+      const businessId = req.businessId!;
+      const staffUser = req.user!;
+
+      if (!cardId) {
+        return sendError(res, 400, 'cardId is required.');
+      }
+
+      try {
+        const result = db.transaction(() => {
+          const card = db.queryOne<{ id: string; customer_id: string }>(
+            'SELECT id, customer_id FROM loyalty_cards WHERE id = ? AND business_id = ?;',
+            [cardId, businessId]
+          );
+
+          if (!card) {
+            throw new Error('Loyalty card not found in this business.');
+          }
+
+          // Revoke old tokens
+          db.execute('UPDATE qr_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE card_id = ?;', [card.id]);
+
+          // Generate new 128-bit high-entropy token
+          const newRawToken = generateQrToken();
+          const newHash = hashSha256(newRawToken);
+
+          // Update card record
+          db.execute(
+            'UPDATE loyalty_cards SET qr_token_hash = ?, qr_token_raw = NULL WHERE id = ?;',
+            [newHash, card.id]
+          );
+
+          // Insert into qr_tokens registry
+          db.execute(
+            'INSERT INTO qr_tokens (token_hash, card_id, customer_id, business_id) VALUES (?, ?, ?, ?);',
+            [newHash, card.id, card.customer_id, businessId]
+          );
+
+          logAudit({
+            businessId,
+            userId: staffUser.id,
+            userName: `${staffUser.name} (${staffUser.role})`,
+            actorType: 'merchant',
+            action: 'QR_TOKEN_ROTATED',
+            entityType: 'loyalty_card',
+            entityId: card.id,
+            details: `Rotated QR bearer token for card ${card.id}. Previous tokens revoked.`,
+          });
+
+          return {
+            success: true,
+            message: 'Card QR token rotated successfully.',
+            cardId: card.id,
+            newQrToken: newRawToken,
+          };
+        });
+
+        return res.json(result);
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : 'QR rotation failed';
         return sendError(res, 400, msg);
       }
     }
@@ -1222,40 +1406,199 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
   );
 
   // =========================================================================
-  // 6. PAYMENT WEBHOOKS (Idempotency & Replay Prevention)
+  // 6. PAYMENT WEBHOOKS (Razorpay, Stripe & Unified Idempotent Processors)
   // =========================================================================
 
   /**
-   * POST /api/v1/webhooks/payment
-   * Verifies webhook HMAC signature against raw body, ensures idempotency,
-   * and handles subscription status changes.
-   * Security Rule: FAILS CLOSED if signature is invalid or secret is not configured.
+   * POST /api/v1/webhooks/razorpay
+   * Verifies Razorpay HMAC SHA-256 signature against raw request bytes.
+   * Handles payment.captured, order.paid, subscription.charged with idempotency.
    */
-  router.post('/webhooks/payment', (req: Request, res: Response) => {
-    const signature = (req.headers['x-webhook-signature'] ||
-      req.headers['stripe-signature'] ||
-      req.headers['x-razorpay-signature']) as string | undefined;
+  router.post('/webhooks/razorpay', (req: Request, res: Response) => {
+    const signature = req.headers['x-razorpay-signature'] as string | undefined;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET;
 
-    const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET;
-
-    // Fail closed: Webhook secret must be explicitly configured
     if (!webhookSecret) {
-      return sendError(
-        res,
-        500,
-        'Webhook rejected: Payment webhook signing secret is not configured on server (Fail Closed).'
-      );
+      return sendError(res, 500, 'Razorpay webhook rejected: Signing secret is not configured on server (Fail Closed).');
     }
 
     if (!signature) {
-      return sendError(
-        res,
-        401,
-        'Unauthorized: Missing required webhook signature header (x-webhook-signature).'
-      );
+      return sendError(res, 401, 'Unauthorized: Missing required x-razorpay-signature header.');
     }
 
-    // Verify cryptographic HMAC SHA-256 signature against the raw body
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+    const isSignatureValid = verifyRazorpayWebhook(rawBody, signature, webhookSecret);
+
+    if (!isSignatureValid) {
+      return sendError(res, 401, 'Unauthorized: Invalid Razorpay webhook signature.');
+    }
+
+    const event = req.body;
+    const webhookId = (req.headers['x-razorpay-event-id'] as string) ||
+                      event.id ||
+                      (event.payload?.payment?.entity?.id ? `rzp_${event.payload.payment.entity.id}` : undefined);
+
+    if (!webhookId) {
+      return sendError(res, 400, 'Webhook event ID could not be identified.');
+    }
+
+    // Check idempotency
+    const existing = db.queryOne<{ webhook_id: string }>(
+      'SELECT webhook_id FROM payment_webhooks WHERE webhook_id = ?;',
+      [webhookId]
+    );
+
+    if (existing) {
+      return res.json({ success: true, message: 'Event already processed (Idempotent response).' });
+    }
+
+    // Verify payment event validity
+    const eventType = event.event;
+    const validEvents = ['payment.captured', 'order.paid', 'subscription.charged', 'subscription.activated'];
+    if (!validEvents.includes(eventType)) {
+      // Record ignored event for audit and return 200
+      return res.json({ success: true, message: `Ignored unhandled event: ${eventType}` });
+    }
+
+    const businessId = event.payload?.payment?.entity?.notes?.businessId ||
+                       event.payload?.order?.entity?.notes?.businessId ||
+                       event.businessId;
+    const planId = event.payload?.payment?.entity?.notes?.planId ||
+                   event.payload?.order?.entity?.notes?.planId ||
+                   event.planId;
+
+    db.transaction(() => {
+      const payloadHash = hashSha256(typeof rawBody === 'string' ? rawBody : JSON.stringify(req.body));
+      db.execute(
+        "INSERT INTO payment_webhooks (webhook_id, business_id, event_type, payload_hash, status) VALUES (?, ?, ?, ?, 'processed');",
+        [webhookId, businessId || null, eventType, payloadHash]
+      );
+
+      if (businessId && planId) {
+        db.execute(
+          "UPDATE subscriptions SET plan_id = ?, status = 'active', current_period_start = CURRENT_TIMESTAMP WHERE business_id = ?;",
+          [planId, businessId]
+        );
+
+        logAudit({
+          businessId,
+          userId: 'system_razorpay',
+          userName: 'Razorpay Webhook Service',
+          actorType: 'system',
+          action: 'SUBSCRIPTION_ACTIVATED_WEBHOOK',
+          entityType: 'subscription',
+          entityId: businessId,
+          details: `Processed Razorpay event '${eventType}' (${webhookId}). Upgraded to plan '${planId}'.`,
+        });
+      }
+    });
+
+    return res.json({ success: true, message: 'Razorpay payment verified and processed successfully.' });
+  });
+
+  /**
+   * POST /api/v1/webhooks/stripe
+   * Verifies Stripe signature against raw request bytes with timestamp replay tolerance.
+   * Handles checkout.session.completed and invoice.paid.
+   */
+  router.post('/webhooks/stripe', (req: Request, res: Response) => {
+    const signature = req.headers['stripe-signature'] as string | undefined;
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET || process.env.PAYMENT_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+      return sendError(res, 500, 'Stripe webhook rejected: Signing secret is not configured on server (Fail Closed).');
+    }
+
+    if (!signature) {
+      return sendError(res, 401, 'Unauthorized: Missing required stripe-signature header.');
+    }
+
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+    const isSignatureValid = verifyStripeWebhook(rawBody, signature, webhookSecret, 300);
+
+    if (!isSignatureValid) {
+      return sendError(res, 401, 'Unauthorized: Invalid Stripe webhook signature or expired timestamp.');
+    }
+
+    const event = req.body;
+    const webhookId = event.id;
+
+    if (!webhookId) {
+      return sendError(res, 400, 'Stripe event id is required.');
+    }
+
+    // Check idempotency
+    const existing = db.queryOne<{ webhook_id: string }>(
+      'SELECT webhook_id FROM payment_webhooks WHERE webhook_id = ?;',
+      [webhookId]
+    );
+
+    if (existing) {
+      return res.json({ success: true, message: 'Stripe event already processed (Idempotent response).' });
+    }
+
+    const eventType = event.type;
+    const validEvents = ['checkout.session.completed', 'invoice.paid', 'customer.subscription.updated'];
+    if (!validEvents.includes(eventType)) {
+      return res.json({ success: true, message: `Ignored unhandled Stripe event: ${eventType}` });
+    }
+
+    const businessId = event.data?.object?.client_reference_id ||
+                       event.data?.object?.metadata?.businessId;
+    const planId = event.data?.object?.metadata?.planId;
+
+    db.transaction(() => {
+      const payloadHash = hashSha256(typeof rawBody === 'string' ? rawBody : JSON.stringify(req.body));
+      db.execute(
+        "INSERT INTO payment_webhooks (webhook_id, business_id, event_type, payload_hash, status) VALUES (?, ?, ?, ?, 'processed');",
+        [webhookId, businessId || null, eventType, payloadHash]
+      );
+
+      if (businessId && planId) {
+        db.execute(
+          "UPDATE subscriptions SET plan_id = ?, status = 'active', current_period_start = CURRENT_TIMESTAMP WHERE business_id = ?;",
+          [planId, businessId]
+        );
+
+        logAudit({
+          businessId,
+          userId: 'system_stripe',
+          userName: 'Stripe Webhook Service',
+          actorType: 'system',
+          action: 'SUBSCRIPTION_ACTIVATED_WEBHOOK',
+          entityType: 'subscription',
+          entityId: businessId,
+          details: `Processed Stripe event '${eventType}' (${webhookId}). Upgraded to plan '${planId}'.`,
+        });
+      }
+    });
+
+    return res.json({ success: true, message: 'Stripe payment verified and processed successfully.' });
+  });
+
+  /**
+   * POST /api/v1/webhooks/payment
+   * Unified webhook router supporting x-razorpay-signature, stripe-signature, or x-webhook-signature
+   */
+  router.post('/webhooks/payment', (req: Request, res: Response) => {
+    if (req.headers['x-razorpay-signature']) {
+      return (router as any).handle({ ...req, url: '/webhooks/razorpay' }, res);
+    }
+    if (req.headers['stripe-signature']) {
+      return (router as any).handle({ ...req, url: '/webhooks/stripe' }, res);
+    }
+
+    const signature = req.headers['x-webhook-signature'] as string | undefined;
+    const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
+      return sendError(res, 500, 'Webhook rejected: Payment webhook signing secret is not configured on server (Fail Closed).');
+    }
+
+    if (!signature) {
+      return sendError(res, 401, 'Unauthorized: Missing required webhook signature header (x-webhook-signature).');
+    }
+
     const rawBody = (req as any).rawBody || JSON.stringify(req.body);
     const isSignatureValid = verifyWebhookSignature(rawBody, signature, webhookSecret);
 
@@ -1277,11 +1620,9 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
     );
 
     if (existing) {
-      // Return 200 OK without re-processing duplicate webhook
       return res.json({ success: true, message: 'Webhook already processed (Idempotent response).' });
     }
 
-    // Process payment event in ACID transaction
     db.transaction(() => {
       const payloadHash = hashSha256(typeof rawBody === 'string' ? rawBody : JSON.stringify(req.body));
       db.execute(

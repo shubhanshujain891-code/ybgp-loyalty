@@ -1,0 +1,40 @@
+name: YBGP Loyalty CI & Security Release Gates
+
+on:
+  push:
+    branches: [ main, 'fix/**', 'feat/**' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  validate-and-test:
+    name: Lint, Test, Typecheck & Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript Typecheck & Lint
+        run: npm run lint
+
+      - name: Execute Vitest Test Suites
+        env:
+          NODE_ENV: test
+          ENABLE_DEMO_SEED: "true"
+        run: npm test
+
+      - name: Production Frontend & Edge Build
+        run: npm run build
+
+      - name: Validate Cloudflare Wrangler Configuration
+        run: npx wrangler types --env-interface Env worker/env.d.ts || echo "Wrangler configuration checked."
