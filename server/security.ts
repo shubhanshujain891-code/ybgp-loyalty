@@ -102,3 +102,77 @@ export function sanitizeUrl(url: string | undefined | null): string {
 
   return `https://${trimmed}`;
 }
+
+/**
+ * Generate cryptographically secure random salt
+ */
+export function generateSalt(bytes: number = 16): string {
+  return crypto.randomBytes(bytes).toString('hex');
+}
+
+/**
+ * Hash password using scrypt (memory-hard, computationally expensive, resistant to GPU brute-force)
+ */
+export function hashPassword(password: string, salt: string): string {
+  if (!password || !salt) {
+    throw new Error('Password and salt are required for hashing.');
+  }
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+/**
+ * Verify password with constant-time equality check
+ */
+export function verifyPassword(password: string, salt: string, expectedHash: string): boolean {
+  if (!password || !salt || !expectedHash) return false;
+  try {
+    const computedHash = crypto.scryptSync(password, salt, 64).toString('hex');
+    const computedBuf = Buffer.from(computedHash, 'hex');
+    const expectedBuf = Buffer.from(expectedHash, 'hex');
+    if (computedBuf.length !== expectedBuf.length) {
+      return false;
+    }
+    return crypto.timingSafeEqual(computedBuf, expectedBuf);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Constant-time string comparison to prevent timing attacks
+ */
+export function timingSafeMatch(a: string, b: string): boolean {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+/**
+ * Verify payment webhook HMAC signature (Razorpay/Stripe compatible)
+ * Fails closed if signature is missing or incorrect.
+ */
+export function verifyWebhookSignature(rawBody: string | Buffer, signatureHeader: string | undefined, secret: string): boolean {
+  if (!signatureHeader || !secret) {
+    return false;
+  }
+  try {
+    const hmac = crypto.createHmac('sha256', secret);
+    hmac.update(typeof rawBody === 'string' ? rawBody : rawBody.toString('utf8'));
+    const expectedSignature = hmac.digest('hex');
+
+    // Handle possible 'sha256=' or 'v1=' prefix in signatureHeader
+    const cleanHeader = signatureHeader.replace(/^sha256=|^v1=/, '').trim();
+    return timingSafeMatch(cleanHeader, expectedSignature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Generate cryptographically random 6-digit OTP code
+ */
+export function generateSecureOtp(): string {
+  return crypto.randomInt(100000, 1000000).toString();
+}

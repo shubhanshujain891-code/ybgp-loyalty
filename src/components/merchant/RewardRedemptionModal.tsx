@@ -45,32 +45,11 @@ export const RewardRedemptionModal: React.FC<RewardRedemptionModalProps> = ({
       const locations = dbService.getLocationsByBusiness(business.id);
       const locId = locations[0]?.id || 'loc_main';
 
-      // 1. Try server API
-      try {
-        const res = await api.merchant.redeemReward({
-          businessId: business.id,
-          cardId: card.id,
-          entitlementId: entitlementId || 'ent_rahul_coffee',
-          locationId: locId,
-        });
-        if (res.success) {
-          confetti({
-            particleCount: 70,
-            spread: 80,
-            origin: { y: 0.5 },
-          });
-          onSuccess(res.redemptionCode);
-          return;
-        }
-      } catch {
-        // Fallback to local DB service
-      }
-
-      const res = dbService.redeemReward({
+      // Authoritative server API redemption
+      const res = await api.merchant.redeemReward({
         businessId: business.id,
         cardId: card.id,
-        rewardId: selectedRewardId,
-        staffUser: currentUser,
+        entitlementId: entitlementId || 'ent_rahul_coffee',
         locationId: locId,
       });
 
@@ -80,7 +59,7 @@ export const RewardRedemptionModal: React.FC<RewardRedemptionModalProps> = ({
           spread: 80,
           origin: { y: 0.5 },
         });
-        onSuccess(res.redemption.redemptionCode);
+        onSuccess(res.redemptionCode);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Redemption failed';

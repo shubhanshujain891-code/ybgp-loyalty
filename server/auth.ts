@@ -6,7 +6,7 @@
 
 import { Request, Response, NextFunction } from 'express';
 import { ServerDatabase } from './db';
-import { generateRandomToken, hashSha256, generateId } from './security';
+import { generateRandomToken, hashSha256, generateId, verifyPassword } from './security';
 import { User, UserRole } from '../src/types';
 
 export interface AuthenticatedRequest extends Request {
@@ -27,12 +27,80 @@ export class AuthService {
   }
 
   /**
+   * Authenticate user with verified email and password hash
+   * Computationally expensive scrypt verification, constant-time comparison
+   */
+  public authenticateWithPassword(
+    email: string,
+    password: string,
+    ipAddress?: string,
+    userAgent?: string
+  ): { token: string; expiresAt: string; user: User } {
+    if (!email || !password) {
+      throw new Error('Email and password are required.');
+    }
+
+    const row = this.db.queryOne<{
+      id: string;
+      name: string;
+      email: string;
+      phone: string;
+      role: UserRole;
+      businessId: string | null;
+      passwordHash: string | null;
+      passwordSalt: string | null;
+      accountStatus: string;
+    }>(
+      `SELECT id, name, email, phone, role, business_id as businessId,
+              password_hash as passwordHash, password_salt as passwordSalt,
+              account_status as accountStatus
+       FROM users
+       WHERE lower(email) = lower(?);`,
+      [email.trim()]
+    );
+
+    if (!row) {
+      throw new Error('Invalid email or password.');
+    }
+
+    if (row.accountStatus && row.accountStatus !== 'active') {
+      throw new Error('Account is suspended or deactivated. Contact platform support.');
+    }
+
+    if (!row.passwordHash || !row.passwordSalt) {
+      throw new Error('Account password credentials not configured. Please contact administrator.');
+    }
+
+    const isValid = verifyPassword(password, row.passwordSalt, row.passwordHash);
+    if (!isValid) {
+      throw new Error('Invalid email or password.');
+    }
+
+    // If user belongs to a business, check that the business is not suspended
+    if (row.businessId && row.role !== 'platform_admin') {
+      const biz = this.db.queryOne<{ status: string }>('SELECT status FROM businesses WHERE id = ?;', [row.businessId]);
+      if (biz && biz.status === 'suspended') {
+        throw new Error('This business account is currently suspended. Please contact YBGP billing support.');
+      }
+    }
+
+    return this.createSession(row.id, ipAddress, userAgent);
+  }
+
+  /**
    * Create authenticated session for merchant/admin user
    */
   public createSession(userId: string, ipAddress?: string, userAgent?: string): { token: string; expiresAt: string; user: User } {
-    const user = this.db.queryOne<User>('SELECT id, name, email, phone, role, business_id as businessId, created_at as createdAt FROM users WHERE id = ?;', [userId]);
+    const user = this.db.queryOne<User & { accountStatus?: string }>(
+      'SELECT id, name, email, phone, role, business_id as businessId, account_status as accountStatus, created_at as createdAt FROM users WHERE id = ?;',
+      [userId]
+    );
     if (!user) {
       throw new Error('User not found.');
+    }
+
+    if (user.accountStatus && user.accountStatus !== 'active') {
+      throw new Error('User account is not active.');
     }
 
     const rawToken = generateRandomToken(32);
@@ -47,7 +115,33 @@ export class AuthService {
       [sessionId, tokenHash, user.id, user.businessId || null, user.role, ipAddress || null, userAgent || null, expiresAt]
     );
 
-    return { token: rawToken, expiresAt, user };
+    return {
+      token: rawToken,
+      expiresAt,
+      user: {
+        id: user.id,
+        name: user.name,
+        email: user.email,
+        phone: user.phone,
+        role: user.role,
+        businessId: user.businessId,
+        createdAt: user.createdAt,
+      },
+    };
+  }
+
+  /**
+   * Revoke single session by ID
+   */
+  public revokeSession(sessionId: string): void {
+    this.db.execute('DELETE FROM sessions WHERE id = ?;', [sessionId]);
+  }
+
+  /**
+   * Revoke all sessions for a user
+   */
+  public revokeAllUserSessions(userId: string): void {
+    this.db.execute('DELETE FROM sessions WHERE user_id = ?;', [userId]);
   }
 
   /**
@@ -66,9 +160,10 @@ export class AuthService {
       role: UserRole;
       businessId: string;
       expiresAt: string;
+      accountStatus: string;
     }>(
       `SELECT s.id as sessionId, s.business_id as businessId, s.expires_at as expiresAt,
-              u.id as userId, u.name, u.email, u.phone, u.role
+              u.id as userId, u.name, u.email, u.phone, u.role, u.account_status as accountStatus
        FROM sessions s
        JOIN users u ON s.user_id = u.id
        WHERE s.token_hash = ? AND s.expires_at > CURRENT_TIMESTAMP;`,
@@ -76,6 +171,10 @@ export class AuthService {
     );
 
     if (!row) return null;
+
+    if (row.accountStatus && row.accountStatus !== 'active') {
+      return null;
+    }
 
     const user: User = {
       id: row.userId,
@@ -132,14 +231,22 @@ export class AuthService {
 
 /**
  * Express Middleware: Require Authenticated Merchant or Admin
+ * In production mode: STRICTLY enforces Bearer session tokens.
+ * In development/test mode: Demo headers are ignored unless explicitly permitted in dev.
  */
 export function requireAuth(authService: AuthService) {
   return (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
     const authHeader = req.headers.authorization;
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      // Check for dev demo token bypass in development mode if provided in header
+      // In production mode, reject immediately with 401. Never trust x-ybgp-user-id in production!
+      if (process.env.NODE_ENV === 'production') {
+        res.status(401).json({ error: 'Unauthorized: Valid authentication session token required.' });
+        return;
+      }
+
+      // In development mode only, check if dev bypass is explicitly allowed
       const demoUserId = req.headers['x-ybgp-user-id'] as string;
-      if (process.env.NODE_ENV !== 'production' && demoUserId) {
+      if (process.env.ALLOW_DEV_AUTH_BYPASS === 'true' && demoUserId) {
         const user = authService['db'].queryOne<User>(
           'SELECT id, name, email, phone, role, business_id as businessId, created_at as createdAt FROM users WHERE id = ?;',
           [demoUserId]

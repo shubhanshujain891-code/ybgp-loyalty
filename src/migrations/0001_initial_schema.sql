@@ -142,13 +142,13 @@ CREATE TABLE IF NOT EXISTS loyalty_cards (
     total_lifetime_stamps INTEGER DEFAULT 0,
     card_status TEXT CHECK(card_status IN ('active', 'completed', 'expired')) DEFAULT 'active',
     qr_token_hash TEXT UNIQUE NOT NULL,
-    qr_token_raw TEXT UNIQUE NOT NULL,
+    qr_token_raw TEXT,
     last_stamped_at TIMESTAMP,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_cards_customer ON loyalty_cards(customer_id);
-CREATE INDEX IF NOT EXISTS idx_cards_qr ON loyalty_cards(qr_token_raw);
+CREATE INDEX IF NOT EXISTS idx_cards_qr ON loyalty_cards(qr_token_hash);
 
 -- 9. Append-Only Stamp Transactions Ledger
 CREATE TABLE IF NOT EXISTS stamp_transactions (

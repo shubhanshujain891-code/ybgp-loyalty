@@ -50,12 +50,7 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
 
     setLoading(true);
     try {
-      let result;
-      try {
-        result = await api.public.requestOtp(norm, business.id);
-      } catch {
-        result = await smsService.requestOtp(norm, business.name);
-      }
+      const result = await api.public.requestOtp(norm, business.id);
 
       if (result.success) {
         setSimulatedCode(result.simulatedOtp || null);
@@ -91,45 +86,23 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
 
     setLoading(true);
     try {
-      try {
-        const res = await api.public.registerCustomer({
-          name: name.trim(),
-          phone,
-          otp: enteredOtp,
-          businessId: business.id,
-          serviceConsent: consent,
-        });
-
-        localStorage.setItem(`ybgp_cust_session_${business.id}`, res.sessionToken);
-        const cardToken = (res.card as any).qrToken || res.card.qrTokenRaw;
-        if (cardToken) {
-          localStorage.setItem(`ybgp_cust_token_${business.id}`, cardToken);
-        }
-
-        onSuccess(res.customer, res.card);
-        return;
-      } catch {
-        // Fallback to client service
-      }
-
-      const verifyRes = await smsService.verifyOtp(phone, enteredOtp);
-      if (!verifyRes.success) {
-        setErrorMessage(verifyRes.message);
-        setLoading(false);
-        return;
-      }
-
-      const { customer, card } = dbService.registerCustomer({
-        businessId: business.id,
+      const res = await api.public.registerCustomer({
         name: name.trim(),
         phone,
-        consentGiven: consent,
+        otp: enteredOtp,
+        businessId: business.id,
+        serviceConsent: consent,
       });
 
-      localStorage.setItem(`ybgp_cust_token_${business.id}`, card.qrTokenRaw);
-      onSuccess(customer, card);
+      localStorage.setItem(`ybgp_cust_session_${business.id}`, res.sessionToken);
+      const cardToken = (res.card as any).qrToken || res.card.qrTokenRaw;
+      if (cardToken) {
+        localStorage.setItem(`ybgp_cust_token_${business.id}`, cardToken);
+      }
+
+      onSuccess(res.customer, res.card);
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : 'Registration failed';
+      const msg = err instanceof Error ? err.message : 'Registration failed. Please check your verification code and retry.';
       setErrorMessage(msg);
     } finally {
       setLoading(false);

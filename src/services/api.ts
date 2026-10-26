@@ -53,8 +53,16 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   auth: {
-    async login(params: { email?: string; userId?: string }): Promise<{ token: string; user: User }> {
+    async login(params: { email: string; password: string }): Promise<{ token: string; user: User }> {
       const res = await request<{ success: boolean; token: string; user: User }>('/auth/login', {
+        method: 'POST',
+        body: JSON.stringify(params),
+      });
+      setSessionToken(res.token);
+      return res;
+    },
+    async signup(params: { name: string; email: string; phone: string; password: string }): Promise<{ token: string; user: User }> {
+      const res = await request<{ success: boolean; token: string; user: User }>('/auth/signup', {
         method: 'POST',
         body: JSON.stringify(params),
       });

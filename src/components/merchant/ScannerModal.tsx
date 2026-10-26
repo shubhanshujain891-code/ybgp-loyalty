@@ -85,23 +85,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
         availableEntitlements: res.availableEntitlements || [],
       });
     } catch (err: unknown) {
-      // Fallback to client database if backend route not reached or during mock
-      try {
-        const qrMatch = dbService.getCardByQrToken(clean);
-        if (qrMatch && qrMatch.business.id === business.id) {
-          stableIdempotencyKeyRef.current = `award_${qrMatch.card.id}_stamps_${qrMatch.card.currentStamps}_${Math.random().toString(36).slice(2, 8)}`;
-          setResolvedData({
-            card: qrMatch.card,
-            customer: qrMatch.customer,
-            program: qrMatch.program,
-            availableEntitlements: [],
-          });
-          return;
-        }
-      } catch {
-        // ignore
-      }
-
+      // Production fail-closed: Do NOT fall back to unverified local browser state
       const msg = err instanceof Error ? err.message : 'No matching loyalty pass found for this code.';
       setSearchError(msg);
     } finally {
@@ -188,25 +172,12 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
       const locations = dbService.getLocationsByBusiness(business.id);
       const locId = locations[0]?.id || 'loc_main';
 
-      let res: any;
-      try {
-        res = await api.merchant.awardStamps({
-          cardId: resolvedData.card.id,
-          locationId: locId,
-          idempotencyKey,
-          businessId: business.id,
-        });
-      } catch (backendErr) {
-        // Fallback to local db service
-        res = dbService.awardStamps({
-          businessId: business.id,
-          cardId: resolvedData.card.id,
-          staffUser: currentUser,
-          locationId: locId,
-          stampsToAward: 1,
-          idempotencyKey,
-        });
-      }
+      const res = await api.merchant.awardStamps({
+        cardId: resolvedData.card.id,
+        locationId: locId,
+        idempotencyKey,
+        businessId: business.id,
+      });
 
       if (res.success) {
         confetti({

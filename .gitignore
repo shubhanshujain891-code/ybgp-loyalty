@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# SQLite Runtime Database Files
+database.sqlite
+database.sqlite-*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*

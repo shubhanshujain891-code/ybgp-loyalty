@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { generateId, generateQrToken, hashSha256 } from './security';
+import { generateId, generateQrToken, hashSha256, generateSalt, hashPassword } from './security';
 import { YBGP_CONFIG } from '../src/config/ybgp';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,14 +27,43 @@ export class ServerDatabase {
   }
 
   private runMigrations(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS schema_migrations (
+        name TEXT PRIMARY KEY,
+        applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+    `);
+
     const migrationsDir = path.resolve(__dirname, '../src/migrations');
-    const migrationFiles = ['0001_initial_schema.sql', '0002_production_hardening.sql'];
+    const migrationFiles = [
+      '0001_initial_schema.sql',
+      '0002_production_hardening.sql',
+      '0003_secure_qr_tokens.sql',
+    ];
 
     for (const file of migrationFiles) {
-      const filePath = path.join(migrationsDir, file);
-      if (fs.existsSync(filePath)) {
-        const sql = fs.readFileSync(filePath, 'utf8');
-        this.db.exec(sql);
+      const alreadyApplied = this.queryOne<{ name: string }>(
+        'SELECT name FROM schema_migrations WHERE name = ?;',
+        [file]
+      );
+
+      if (!alreadyApplied) {
+        const filePath = path.join(migrationsDir, file);
+        if (fs.existsSync(filePath)) {
+          // Guard for additive migration 0003 on existing database
+          if (file === '0003_secure_qr_tokens.sql') {
+            const cols = this.query<{ name: string }>('PRAGMA table_info(users);');
+            const hasPasswordHash = cols.some((c) => c.name === 'password_hash');
+            if (hasPasswordHash) {
+              this.execute('INSERT OR IGNORE INTO schema_migrations (name) VALUES (?);', [file]);
+              continue;
+            }
+          }
+
+          const sql = fs.readFileSync(filePath, 'utf8');
+          this.db.exec(sql);
+          this.execute('INSERT OR IGNORE INTO schema_migrations (name) VALUES (?);', [file]);
+        }
       }
     }
   }
@@ -73,7 +102,7 @@ export class ServerDatabase {
     }
 
     this.transaction(() => {
-      // 1. Users
+      // 1. Users with Salted scrypt password hashes
       const users = [
         {
           id: 'usr_admin',
@@ -82,6 +111,7 @@ export class ServerDatabase {
           phone: '+919876500001',
           role: 'platform_admin',
           business_id: null,
+          password: 'Admin@ybgp2026!',
         },
         {
           id: 'usr_owner_chai',
@@ -90,6 +120,7 @@ export class ServerDatabase {
           phone: '+919820011223',
           role: 'owner',
           business_id: 'biz_chaico',
+          password: 'Owner@chaico2026!',
         },
         {
           id: 'usr_mgr_chai',
@@ -98,6 +129,7 @@ export class ServerDatabase {
           phone: '+919820022334',
           role: 'manager',
           business_id: 'biz_chaico',
+          password: 'Manager@chaico2026!',
         },
         {
           id: 'usr_cashier_chai',
@@ -106,6 +138,7 @@ export class ServerDatabase {
           phone: '+919820033445',
           role: 'cashier',
           business_id: 'biz_chaico',
+          password: 'Cashier@chaico2026!',
         },
         {
           id: 'usr_owner_salon',
@@ -114,13 +147,16 @@ export class ServerDatabase {
           phone: '+919811122334',
           role: 'owner',
           business_id: 'biz_royalshave',
+          password: 'Owner@royalshave2026!',
         },
       ];
 
       for (const u of users) {
+        const salt = generateSalt(16);
+        const hash = hashPassword(u.password, salt);
         this.execute(
-          'INSERT INTO users (id, name, email, phone, role, business_id) VALUES (?, ?, ?, ?, ?, ?);',
-          [u.id, u.name, u.email, u.phone, u.role, u.business_id]
+          'INSERT INTO users (id, name, email, phone, role, business_id, password_hash, password_salt, account_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);',
+          [u.id, u.name, u.email, u.phone, u.role, u.business_id, hash, salt, 'active']
         );
       }
 
@@ -350,8 +386,8 @@ export class ServerDatabase {
       this.execute(
         `INSERT INTO loyalty_cards (
           id, customer_id, business_id, program_id, current_stamps, total_lifetime_stamps, card_status, qr_token_hash, qr_token_raw
-        ) VALUES (?, ?, ?, ?, 7, 7, 'active', ?, ?);`,
-        ['crd_ananya_chai', 'cust_ananya', 'biz_chaico', 'prg_chaico_coffee', hashAnanya, rawTokenAnanya]
+        ) VALUES (?, ?, ?, ?, 7, 7, 'active', ?, NULL);`,
+        ['crd_ananya_chai', 'cust_ananya', 'biz_chaico', 'prg_chaico_coffee', hashAnanya]
       );
 
       this.execute(
@@ -373,8 +409,8 @@ export class ServerDatabase {
       this.execute(
         `INSERT INTO loyalty_cards (
           id, customer_id, business_id, program_id, current_stamps, total_lifetime_stamps, card_status, qr_token_hash, qr_token_raw
-        ) VALUES (?, ?, ?, ?, 8, 8, 'completed', ?, ?);`,
-        ['crd_rahul_chai', 'cust_rahul', 'biz_chaico', 'prg_chaico_coffee', hashRahul, rawTokenRahul]
+        ) VALUES (?, ?, ?, ?, 8, 8, 'completed', ?, NULL);`,
+        ['crd_rahul_chai', 'cust_rahul', 'biz_chaico', 'prg_chaico_coffee', hashRahul]
       );
 
       this.execute(

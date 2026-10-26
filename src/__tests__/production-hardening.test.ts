@@ -16,6 +16,7 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
+import crypto from 'node:crypto';
 import { ServerDatabase } from '../../server/db';
 import { AuthService } from '../../server/auth';
 import { createApiRouter } from '../../server/api';
@@ -258,6 +259,9 @@ describe('YBGP Production Hardening & Security Suite', () => {
 
   // 12. Payment webhook retries do not duplicate state changes
   it('12. Payment webhook retries are idempotent and do not duplicate processing', async () => {
+    const webhookSecret = 'test_webhook_secret_key_123';
+    process.env.PAYMENT_WEBHOOK_SECRET = webhookSecret;
+
     const webhookPayload = {
       webhookId: 'wh_order_paid_998811',
       businessId: 'biz_chaico',
@@ -265,8 +269,12 @@ describe('YBGP Production Hardening & Security Suite', () => {
       planId: 'plan_pro',
     };
 
+    const payloadStr = JSON.stringify(webhookPayload);
+    const signature = crypto.createHmac('sha256', webhookSecret).update(payloadStr).digest('hex');
+
     const res1 = await request(app)
       .post('/api/v1/webhooks/payment')
+      .set('x-webhook-signature', signature)
       .send(webhookPayload);
 
     expect(res1.status).toBe(200);
@@ -275,6 +283,7 @@ describe('YBGP Production Hardening & Security Suite', () => {
     // Immediate webhook replay
     const res2 = await request(app)
       .post('/api/v1/webhooks/payment')
+      .set('x-webhook-signature', signature)
       .send(webhookPayload);
 
     expect(res2.status).toBe(200);

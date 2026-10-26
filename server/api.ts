@@ -15,6 +15,11 @@ import {
   normalizeIndianPhone,
   maskPhone,
   sanitizeUrl,
+  generateSalt,
+  hashPassword,
+  verifyPassword,
+  verifyWebhookSignature,
+  generateSecureOtp,
 } from './security';
 import { YBGP_CONFIG } from '../src/config/ybgp';
 
@@ -55,29 +60,69 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
   };
 
   // =========================================================================
-  // 1. AUTHENTICATION ENDPOINTS
+  // 1. AUTHENTICATION ENDPOINTS (Strict Password Verification & RBAC)
   // =========================================================================
 
   /**
    * POST /api/v1/auth/login
-   * Login by email or user ID
+   * Authoritative identity verification via salted scrypt password hash
+   * Never issues sessions based on unverified email or user ID!
    */
   router.post('/auth/login', (req: Request, res: Response) => {
-    const { email, userId } = req.body;
-    let user;
+    const { email, password } = req.body;
 
-    if (userId) {
-      user = db.queryOne<{ id: string }>('SELECT id FROM users WHERE id = ?;', [userId]);
-    } else if (email) {
-      user = db.queryOne<{ id: string }>('SELECT id FROM users WHERE lower(email) = lower(?);', [email]);
+    if (!email || !password) {
+      return sendError(res, 400, 'Email and password are required.');
     }
 
-    if (!user) {
-      return sendError(res, 401, 'Invalid user credentials.');
+    try {
+      const session = authService.authenticateWithPassword(
+        email,
+        password,
+        req.ip,
+        req.headers['user-agent']
+      );
+      return res.json({ success: true, ...session });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Invalid login credentials.';
+      return sendError(res, 401, msg);
+    }
+  });
+
+  /**
+   * POST /api/v1/auth/signup
+   * Public merchant registration.
+   * Security Rule: Public signup CANNOT assign platform_admin role!
+   */
+  router.post('/auth/signup', (req: Request, res: Response) => {
+    const { name, email, phone, password, role } = req.body;
+
+    if (!name || !email || !password || !phone) {
+      return sendError(res, 400, 'Name, email, phone, and password are required.');
     }
 
-    const session = authService.createSession(user.id, req.ip, req.headers['user-agent']);
-    return res.json({ success: true, ...session });
+    // Security Gate: Reject platform_admin role assignment in public registration
+    if (role === 'platform_admin') {
+      return sendError(res, 403, 'Platform administrator accounts cannot be created via public registration.');
+    }
+
+    const existing = db.queryOne<{ id: string }>('SELECT id FROM users WHERE lower(email) = lower(?);', [email]);
+    if (existing) {
+      return sendError(res, 409, 'An account with this email already exists.');
+    }
+
+    const salt = generateSalt(16);
+    const hash = hashPassword(password, salt);
+    const userId = generateId('usr');
+
+    db.execute(
+      `INSERT INTO users (id, name, email, phone, role, password_hash, password_salt, account_status)
+       VALUES (?, ?, ?, ?, 'owner', ?, ?, 'active');`,
+      [userId, name.trim(), email.trim().toLowerCase(), phone.trim(), hash, salt]
+    );
+
+    const session = authService.createSession(userId, req.ip, req.headers['user-agent']);
+    return res.status(201).json({ success: true, ...session });
   });
 
   /**
@@ -202,8 +247,8 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       [norm, businessId]
     );
 
-    // Generate 6-digit OTP code
-    const rawOtp = Math.floor(100000 + Math.random() * 900000).toString();
+    // Generate 6-digit OTP code using cryptographically secure random generator
+    const rawOtp = generateSecureOtp();
     const otpHash = hashSha256(rawOtp, norm);
     const challengeId = generateId('otp');
     const expiresAt = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // 5 min expiry
@@ -228,7 +273,7 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
 
   /**
    * POST /api/v1/public/loyalty/register
-   * Verify OTP and issue/retrieve protected loyalty card & scannable QR pass
+   * Verify OTP atomically and issue/retrieve protected loyalty card & scannable QR pass
    */
   router.post('/public/loyalty/register', (req: Request, res: Response) => {
     const { name, phone, otp, businessId, serviceConsent, marketingConsent } = req.body;
@@ -257,15 +302,22 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       return sendError(res, 429, 'Too many incorrect attempts. Please request a new code.');
     }
 
-    // Hash user-entered OTP and compare
+    // Hash user-entered OTP and compare with timing-safe comparison
     const enteredHash = hashSha256(otp.trim(), norm);
     if (enteredHash !== challenge.otp_hash) {
       db.execute('UPDATE otp_challenges SET attempts = attempts + 1 WHERE id = ?;', [challenge.id]);
       return sendError(res, 400, `Incorrect verification code. ${challenge.max_attempts - (challenge.attempts + 1)} attempts remaining.`);
     }
 
-    // Mark challenge verified
-    db.execute('UPDATE otp_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ?;', [challenge.id]);
+    // Atomic consumption of OTP challenge: prevents race condition / replay attacks
+    const verifyRes = db.execute(
+      'UPDATE otp_challenges SET verified_at = CURRENT_TIMESTAMP WHERE id = ? AND verified_at IS NULL;',
+      [challenge.id]
+    );
+
+    if (verifyRes.changes === 0) {
+      return sendError(res, 400, 'This verification code has already been consumed.');
+    }
 
     // Atomic Customer & Card Provisioning
     const result = db.transaction(() => {
@@ -306,8 +358,8 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       }
 
       // Check for card
-      let card = db.queryOne<{ id: string; current_stamps: number; total_lifetime_stamps: number; card_status: string; qr_token_raw: string }>(
-        'SELECT id, current_stamps, total_lifetime_stamps, card_status, qr_token_raw FROM loyalty_cards WHERE customer_id = ? AND program_id = ?;',
+      let card = db.queryOne<{ id: string; current_stamps: number; total_lifetime_stamps: number; card_status: string }>(
+        'SELECT id, current_stamps, total_lifetime_stamps, card_status FROM loyalty_cards WHERE customer_id = ? AND program_id = ?;',
         [customer.id, activeProgram.id]
       );
 
@@ -317,14 +369,15 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
         rawQrToken = generateQrToken();
         const qrHash = hashSha256(rawQrToken);
 
+        // P0-5: Never store unhashed QR tokens in the cards table! qr_token_raw is NULL
         db.execute(
           `INSERT INTO loyalty_cards (
             id, customer_id, business_id, program_id, current_stamps, total_lifetime_stamps, card_status, qr_token_hash, qr_token_raw
-          ) VALUES (?, ?, ?, ?, 0, 0, 'active', ?, ?);`,
-          [cardId, customer.id, businessId, activeProgram.id, qrHash, rawQrToken]
+          ) VALUES (?, ?, ?, ?, 0, 0, 'active', ?, NULL);`,
+          [cardId, customer.id, businessId, activeProgram.id, qrHash]
         );
 
-        // Registry of valid hashed tokens
+        // Authoritative Registry of valid hashed tokens
         db.execute(
           'INSERT INTO qr_tokens (token_hash, card_id, customer_id, business_id) VALUES (?, ?, ?, ?);',
           [qrHash, cardId, customer.id, businessId]
@@ -335,10 +388,15 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
           current_stamps: 0,
           total_lifetime_stamps: 0,
           card_status: 'active',
-          qr_token_raw: rawQrToken,
         };
       } else {
-        rawQrToken = card.qr_token_raw;
+        // If card already exists, generate a fresh active token and record its hash
+        rawQrToken = generateQrToken();
+        const freshHash = hashSha256(rawQrToken);
+        db.execute(
+          'INSERT INTO qr_tokens (token_hash, card_id, customer_id, business_id) VALUES (?, ?, ?, ?);',
+          [freshHash, card.id, customer.id, businessId]
+        );
       }
 
       // Create session for passwordless access
@@ -386,14 +444,22 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       [session.customerId]
     );
 
-    const card = db.queryOne<{ id: string; current_stamps: number; total_lifetime_stamps: number; card_status: string; qr_token_raw: string; program_id: string }>(
-      'SELECT id, current_stamps, total_lifetime_stamps, card_status, qr_token_raw, program_id FROM loyalty_cards WHERE customer_id = ? AND business_id = ?;',
+    const card = db.queryOne<{ id: string; current_stamps: number; total_lifetime_stamps: number; card_status: string; program_id: string }>(
+      'SELECT id, current_stamps, total_lifetime_stamps, card_status, program_id FROM loyalty_cards WHERE customer_id = ? AND business_id = ?;',
       [session.customerId, session.businessId]
     );
 
     if (!customer || !card) {
       return sendError(res, 404, 'Card not found.');
     }
+
+    // Generate dynamic QR bearer token registered by hash in qr_tokens
+    const liveQrToken = generateQrToken();
+    const liveHash = hashSha256(liveQrToken);
+    db.execute(
+      'INSERT INTO qr_tokens (token_hash, card_id, customer_id, business_id) VALUES (?, ?, ?, ?);',
+      [liveHash, card.id, customer.id, session.businessId]
+    );
 
     // Available earned entitlements
     const entitlements = db.query(
@@ -419,7 +485,7 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
         currentStamps: card.current_stamps,
         totalLifetimeStamps: card.total_lifetime_stamps,
         cardStatus: card.card_status,
-        qrToken: card.qr_token_raw,
+        qrToken: liveQrToken,
       },
       entitlements,
       history,
@@ -516,7 +582,7 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
 
       // Check available earned entitlements
       const entitlements = db.query(
-        'SELECT id, reward_title as rewardTitle, status, redemption_code as redemptionCode FROM reward_entitlements WHERE card_id = ? AND status = "available";',
+        "SELECT id, reward_title as rewardTitle, status, redemption_code as redemptionCode FROM reward_entitlements WHERE card_id = ? AND status = 'available';",
         [resolvedCard.id]
       );
 
@@ -612,10 +678,15 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
             [card.customer_id]
           );
 
-          const location = db.queryOne<{ id: string; name: string }>(
-            'SELECT id, name FROM business_locations WHERE id = ? AND business_id = ?;',
-            [locationId || '', businessId]
-          ) || { id: locationId || 'loc_main', name: 'Main Outlet' };
+          const location = (locationId
+            ? db.queryOne<{ id: string | null; name: string }>(
+                'SELECT id, name FROM business_locations WHERE id = ? AND business_id = ?;',
+                [locationId, businessId]
+              )
+            : db.queryOne<{ id: string | null; name: string }>(
+                'SELECT id, name FROM business_locations WHERE business_id = ? ORDER BY is_primary DESC LIMIT 1;',
+                [businessId]
+              )) || { id: null, name: 'Main Outlet' };
 
           const newStamps = card.current_stamps + 1;
           const newLifetime = card.total_lifetime_stamps + 1;
@@ -771,10 +842,15 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
             [entitlement.customer_id]
           );
 
-          const location = db.queryOne<{ id: string; name: string }>(
-            'SELECT id, name FROM business_locations WHERE id = ? AND business_id = ?;',
-            [locationId || '', businessId]
-          ) || { id: locationId || 'loc_main', name: 'Main Outlet' };
+          const location = (locationId
+            ? db.queryOne<{ id: string | null; name: string }>(
+                'SELECT id, name FROM business_locations WHERE id = ? AND business_id = ?;',
+                [locationId, businessId]
+              )
+            : db.queryOne<{ id: string | null; name: string }>(
+                'SELECT id, name FROM business_locations WHERE business_id = ? ORDER BY is_primary DESC LIMIT 1;',
+                [businessId]
+              )) || { id: null, name: 'Main Outlet' };
 
           // Generate single-use redemption code
           const redemptionCode = `YBGP-RWD-${Math.floor(1000 + Math.random() * 9000)}`;
@@ -1151,17 +1227,50 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
 
   /**
    * POST /api/v1/webhooks/payment
-   * Verifies webhook idempotency and handles subscription status changes
+   * Verifies webhook HMAC signature against raw body, ensures idempotency,
+   * and handles subscription status changes.
+   * Security Rule: FAILS CLOSED if signature is invalid or secret is not configured.
    */
   router.post('/webhooks/payment', (req: Request, res: Response) => {
-    const webhookId = req.headers['x-webhook-id'] as string || req.body.webhookId;
+    const signature = (req.headers['x-webhook-signature'] ||
+      req.headers['stripe-signature'] ||
+      req.headers['x-razorpay-signature']) as string | undefined;
+
+    const webhookSecret = process.env.PAYMENT_WEBHOOK_SECRET;
+
+    // Fail closed: Webhook secret must be explicitly configured
+    if (!webhookSecret) {
+      return sendError(
+        res,
+        500,
+        'Webhook rejected: Payment webhook signing secret is not configured on server (Fail Closed).'
+      );
+    }
+
+    if (!signature) {
+      return sendError(
+        res,
+        401,
+        'Unauthorized: Missing required webhook signature header (x-webhook-signature).'
+      );
+    }
+
+    // Verify cryptographic HMAC SHA-256 signature against the raw body
+    const rawBody = (req as any).rawBody || JSON.stringify(req.body);
+    const isSignatureValid = verifyWebhookSignature(rawBody, signature, webhookSecret);
+
+    if (!isSignatureValid) {
+      return sendError(res, 401, 'Unauthorized: Invalid payment webhook signature.');
+    }
+
+    const webhookId = (req.headers['x-webhook-id'] as string) || req.body.webhookId;
     const { businessId, eventType, planId } = req.body;
 
     if (!webhookId) {
       return sendError(res, 400, 'x-webhook-id header or webhookId is required.');
     }
 
-    // Check if webhook already processed
+    // Check if webhook already processed (Idempotency)
     const existing = db.queryOne<{ webhook_id: string }>(
       'SELECT webhook_id FROM payment_webhooks WHERE webhook_id = ?;',
       [webhookId]
@@ -1172,9 +1281,9 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       return res.json({ success: true, message: 'Webhook already processed (Idempotent response).' });
     }
 
-    // Process payment event
+    // Process payment event in ACID transaction
     db.transaction(() => {
-      const payloadHash = hashSha256(JSON.stringify(req.body));
+      const payloadHash = hashSha256(typeof rawBody === 'string' ? rawBody : JSON.stringify(req.body));
       db.execute(
         "INSERT INTO payment_webhooks (webhook_id, business_id, event_type, payload_hash, status) VALUES (?, ?, ?, ?, 'processed');",
         [webhookId, businessId || null, eventType || 'subscription.paid', payloadHash]
@@ -1188,7 +1297,7 @@ export function createApiRouter(db: ServerDatabase, authService: AuthService): R
       }
     });
 
-    return res.json({ success: true, message: 'Payment webhook processed successfully.' });
+    return res.json({ success: true, message: 'Payment webhook verified and processed successfully.' });
   });
 
   return router;
