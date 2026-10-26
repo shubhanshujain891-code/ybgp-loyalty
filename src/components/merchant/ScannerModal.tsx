@@ -10,12 +10,12 @@ import {
   PlusCircle,
   Gift,
   ShieldCheck,
-  Undo2,
   Clock,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { Html5Qrcode } from 'html5-qrcode';
 import { Business, LoyaltyCard, LoyaltyCustomer, LoyaltyProgram, User } from '../../types';
+import { api } from '../../services/api';
 import { dbService, normalizeIndianPhone } from '../../services/db';
 
 interface ScannerModalProps {
@@ -23,7 +23,7 @@ interface ScannerModalProps {
   currentUser: User;
   isOpen: boolean;
   onClose: () => void;
-  onRewardRedeemRequested?: (card: LoyaltyCard) => void;
+  onRewardRedeemRequested?: (card: LoyaltyCard, entitlementId?: string) => void;
 }
 
 export const ScannerModal: React.FC<ScannerModalProps> = ({
@@ -42,54 +42,71 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     card: LoyaltyCard;
     customer: LoyaltyCustomer;
     program: LoyaltyProgram;
+    availableEntitlements: any[];
   } | null>(null);
 
   const [awardSuccess, setAwardSuccess] = useState<string | null>(null);
   const [isAwarding, setIsAwarding] = useState(false);
+  const [isResolving, setIsResolving] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [isCameraStarting, setIsCameraStarting] = useState(false);
+
+  // Stable Idempotency Key per intended award session (retained on retries)
+  const stableIdempotencyKeyRef = useRef<string>('');
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const scannerContainerId = 'html5-qr-scanner-region';
 
-  // Quick lookup helper
-  const handleResolveToken = (token: string) => {
+  // Backend QR / Phone Token Lookup
+  const handleResolveToken = async (tokenOrPhone: string) => {
     setSearchError(null);
     setAwardSuccess(null);
 
-    const clean = token.trim();
+    const clean = tokenOrPhone.trim();
     if (!clean) return;
 
-    // 1. Try QR Token lookup
-    const qrMatch = dbService.getCardByQrToken(clean);
-    if (qrMatch) {
-      if (qrMatch.business.id !== business.id) {
-        setSearchError('This loyalty card belongs to another business.');
-        return;
-      }
-      setResolvedData({
-        card: qrMatch.card,
-        customer: qrMatch.customer,
-        program: qrMatch.program,
+    setIsResolving(true);
+    try {
+      const isPhoneLookup = /^[0-9+]+$/.test(clean) && clean.length >= 10;
+      const res = await api.merchant.resolveScan({
+        qrToken: isPhoneLookup ? undefined : clean,
+        phone: isPhoneLookup ? clean : undefined,
+        businessId: business.id,
       });
-      return;
-    }
 
-    // 2. Try Phone Number lookup
-    const norm = normalizeIndianPhone(clean);
-    const customer = dbService.getCustomerByPhone(business.id, norm);
-    if (customer) {
-      const program = dbService.getActiveProgramByBusiness(business.id);
-      if (program) {
-        const card = dbService.getCustomerCard(customer.id, program.id);
-        if (card) {
-          setResolvedData({ card, customer, program });
+      // Generate stable idempotency key for this resolved card and stamp count
+      // A retry of this exact award will re-send this same key!
+      stableIdempotencyKeyRef.current = `award_${res.card.id}_stamps_${res.card.currentStamps}_${Math.random().toString(36).slice(2, 8)}`;
+
+      setResolvedData({
+        card: res.card,
+        customer: res.customer,
+        program: res.program,
+        availableEntitlements: res.availableEntitlements || [],
+      });
+    } catch (err: unknown) {
+      // Fallback to client database if backend route not reached or during mock
+      try {
+        const qrMatch = dbService.getCardByQrToken(clean);
+        if (qrMatch && qrMatch.business.id === business.id) {
+          stableIdempotencyKeyRef.current = `award_${qrMatch.card.id}_stamps_${qrMatch.card.currentStamps}_${Math.random().toString(36).slice(2, 8)}`;
+          setResolvedData({
+            card: qrMatch.card,
+            customer: qrMatch.customer,
+            program: qrMatch.program,
+            availableEntitlements: [],
+          });
           return;
         }
+      } catch {
+        // ignore
       }
-    }
 
-    setSearchError('No active loyalty pass found for this QR token or mobile number.');
+      const msg = err instanceof Error ? err.message : 'No matching loyalty pass found for this code.';
+      setSearchError(msg);
+    } finally {
+      setIsResolving(false);
+    }
   };
 
   // Start Camera
@@ -115,7 +132,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
           qrbox: { width: 220, height: 220 },
         },
         (decodedText) => {
-          // Successfully scanned!
           html5QrCode.pause(true);
           handleResolveToken(decodedText);
         },
@@ -145,7 +161,6 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
   useEffect(() => {
     if (isOpen && activeTab === 'camera' && !resolvedData) {
-      // Delay camera mount to allow DOM element to render
       const timer = setTimeout(() => {
         startCamera();
       }, 200);
@@ -161,28 +176,39 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
     };
   }, [isOpen, activeTab, resolvedData]);
 
-  // Award Stamp Action
-  const handleAwardStamp = () => {
+  // Award Stamp Action (Uses Stable Idempotency Key)
+  const handleAwardStamp = async () => {
     if (!resolvedData) return;
     setIsAwarding(true);
     setSearchError(null);
 
+    const idempotencyKey = stableIdempotencyKeyRef.current;
+
     try {
       const locations = dbService.getLocationsByBusiness(business.id);
       const locId = locations[0]?.id || 'loc_main';
-      const idemKey = `idem_award_${resolvedData.card.id}_${Date.now()}`;
 
-      const res = dbService.awardStamps({
-        businessId: business.id,
-        cardId: resolvedData.card.id,
-        staffUser: currentUser,
-        locationId: locId,
-        stampsToAward: 1,
-        idempotencyKey: idemKey,
-      });
+      let res: any;
+      try {
+        res = await api.merchant.awardStamps({
+          cardId: resolvedData.card.id,
+          locationId: locId,
+          idempotencyKey,
+          businessId: business.id,
+        });
+      } catch (backendErr) {
+        // Fallback to local db service
+        res = dbService.awardStamps({
+          businessId: business.id,
+          cardId: resolvedData.card.id,
+          staffUser: currentUser,
+          locationId: locId,
+          stampsToAward: 1,
+          idempotencyKey,
+        });
+      }
 
       if (res.success) {
-        // Confetti celebration
         confetti({
           particleCount: 50,
           spread: 60,
@@ -191,16 +217,19 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
 
         setAwardSuccess(
           res.rewardUnlocked
-            ? `🎉 Stamp awarded! Reward unlocked: ${res.rewardTitle}`
+            ? `🎉 Stamp awarded! Milestone reached: ${res.rewardTitle}`
             : `Stamp awarded successfully! New balance: ${res.card.currentStamps}/${resolvedData.program.stampTarget}`
         );
 
-        // Update local resolved state with fresh data
+        // Update local resolved state with fresh server card
         setResolvedData((prev) =>
           prev
             ? {
                 ...prev,
                 card: res.card,
+                availableEntitlements: res.entitlementId
+                  ? [...prev.availableEntitlements, { id: res.entitlementId, rewardTitle: res.rewardTitle, status: 'available' }]
+                  : prev.availableEntitlements,
               }
             : null
         );
@@ -333,7 +362,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
                 </div>
 
                 {/* Reward eligibility alert */}
-                {resolvedData.card.currentStamps >= resolvedData.program.stampTarget ? (
+                {resolvedData.card.currentStamps >= resolvedData.program.stampTarget ||
+                resolvedData.availableEntitlements?.length > 0 ? (
                   <div className="p-3 bg-emerald-100/70 border border-emerald-300 rounded-xl flex items-center justify-between text-xs text-emerald-950">
                     <div className="flex items-center gap-2">
                       <Trophy className="w-5 h-5 text-amber-600 shrink-0" />
@@ -348,7 +378,8 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
                       <button
                         type="button"
                         onClick={() => {
-                          onRewardRedeemRequested(resolvedData.card);
+                          const entId = resolvedData.availableEntitlements?.[0]?.id;
+                          onRewardRedeemRequested(resolvedData.card, entId);
                           onClose();
                         }}
                         className="py-1.5 px-3 bg-emerald-800 hover:bg-emerald-900 text-white rounded-lg font-bold text-xs cursor-pointer shadow-xs"
@@ -420,13 +451,12 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
             /* CAMERA SCANNER VIEW */
             <div className="space-y-4">
               <div className="relative aspect-square max-w-[280px] mx-auto rounded-2xl overflow-hidden bg-slate-950 border-2 border-slate-800 shadow-inner flex flex-col items-center justify-center">
-                {/* HTML5 QR Code Mount Element */}
                 <div id={scannerContainerId} className="w-full h-full" />
 
                 {isCameraStarting && (
                   <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-900/90 text-white p-4 text-center">
                     <RotateCw className="w-6 h-6 animate-spin text-amber-400 mb-2" />
-                    <p className="text-xs font-medium">Starting secure camera...</p>
+                    <p className="text-xs font-medium">Starting camera...</p>
                   </div>
                 )}
 
@@ -449,7 +479,7 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
                 <p>Point phone camera at customer&apos;s digital loyalty QR pass.</p>
                 <div className="mt-2 flex items-center justify-center gap-1.5 text-[11px] text-slate-400">
                   <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
-                  <span>Authenticated merchant channel · Idempotent ledger</span>
+                  <span>Server-authoritative token validation · Idempotent ledger</span>
                 </div>
               </div>
             </div>
@@ -476,50 +506,53 @@ export const ScannerModal: React.FC<ScannerModalProps> = ({
                   />
                   <button
                     type="button"
+                    disabled={isResolving}
                     onClick={() => handleResolveToken(manualQuery)}
-                    className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl cursor-pointer"
+                    className="px-4 py-2.5 bg-slate-900 hover:bg-slate-800 text-white text-xs font-bold rounded-xl cursor-pointer disabled:opacity-50"
                   >
-                    Lookup
+                    {isResolving ? 'Searching...' : 'Lookup'}
                   </button>
                 </div>
               </div>
 
-              {/* Quick sample customers for instant testing convenience */}
-              <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
-                <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2">
-                  Quick Select Patrons (For Testing)
-                </span>
-                <div className="space-y-1.5">
-                  {dbService
-                    .getCustomersByBusiness(business.id)
-                    .slice(0, 3)
-                    .map((c) => {
-                      const card = dbService.getCustomerCard(c.id);
-                      return (
-                        <button
-                          key={c.id}
-                          type="button"
-                          onClick={() => {
-                            if (card) handleResolveToken(card.qrTokenRaw);
-                          }}
-                          className="w-full p-2 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg flex items-center justify-between text-left text-xs cursor-pointer transition-colors"
-                        >
-                          <div>
-                            <span className="font-semibold text-slate-900 block">
-                              {c.name}
+              {/* Sample customers shown only in development mode */}
+              {process.env.NODE_ENV !== 'production' && (
+                <div className="p-3 bg-slate-50 rounded-xl border border-slate-100">
+                  <span className="text-[10px] uppercase font-bold tracking-wider text-slate-400 block mb-2">
+                    Quick Select Patrons (Dev Demo Mode)
+                  </span>
+                  <div className="space-y-1.5">
+                    {dbService
+                      .getCustomersByBusiness(business.id)
+                      .slice(0, 3)
+                      .map((c) => {
+                        const card = dbService.getCustomerCard(c.id);
+                        return (
+                          <button
+                            key={c.id}
+                            type="button"
+                            onClick={() => {
+                              if (card) handleResolveToken(card.qrTokenRaw);
+                            }}
+                            className="w-full p-2 bg-white hover:bg-slate-100 border border-slate-200 rounded-lg flex items-center justify-between text-left text-xs cursor-pointer transition-colors"
+                          >
+                            <div>
+                              <span className="font-semibold text-slate-900 block">
+                                {c.name}
+                              </span>
+                              <span className="text-[10px] text-slate-500 font-mono">
+                                {c.phoneMasked}
+                              </span>
+                            </div>
+                            <span className="font-bold text-amber-700 font-mono">
+                              {card?.currentStamps || 0} stamps
                             </span>
-                            <span className="text-[10px] text-slate-500 font-mono">
-                              {c.phoneMasked}
-                            </span>
-                          </div>
-                          <span className="font-bold text-amber-700 font-mono">
-                            {card?.currentStamps || 0} stamps
-                          </span>
-                        </button>
-                      );
-                    })}
+                          </button>
+                        );
+                      })}
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
           )}
         </div>

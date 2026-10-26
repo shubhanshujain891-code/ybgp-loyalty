@@ -18,6 +18,7 @@ import {
 } from 'lucide-react';
 import { Business, BusinessLink, LoyaltyCard, LoyaltyCustomer, LoyaltyProgram, StampTransaction } from '../../types';
 import { dbService } from '../../services/db';
+import { api } from '../../services/api';
 import { CustomerRegistrationModal } from './CustomerRegistrationModal';
 import { DigitalStampCard } from './DigitalStampCard';
 import { BrandLogo } from '../common/BrandLogo';

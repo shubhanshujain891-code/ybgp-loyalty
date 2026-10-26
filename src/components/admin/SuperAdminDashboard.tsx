@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { Business, SubscriptionPlan, User } from '../../types';
 import { dbService } from '../../services/db';
+import { api } from '../../services/api';
 import { formatINR, YBGP_CONFIG, formatKolkataDate } from '../../config/ybgp';
 import { BrandLogo } from '../common/BrandLogo';
 
@@ -73,11 +74,17 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
     return acc;
   }, 0);
 
-  const handleUpdateStatus = (e: React.FormEvent) => {
+  const handleUpdateStatus = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!statusModalBiz || !statusReason.trim()) return;
 
-    dbService.setBusinessStatus(statusModalBiz.id, newStatus, statusReason.trim(), currentUser);
+    try {
+      await api.admin.updateBusinessStatus(statusModalBiz.id, newStatus, statusReason.trim());
+    } catch {
+      // Local fallback
+      dbService.setBusinessStatus(statusModalBiz.id, newStatus, statusReason.trim(), currentUser);
+    }
+
     setStatusModalBiz(null);
     setStatusReason('');
     reloadData();

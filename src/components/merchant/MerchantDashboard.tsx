@@ -56,6 +56,7 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
   const [activeTab, setActiveTab] = useState<MerchantTab>('overview');
   const [showScanner, setShowScanner] = useState(false);
   const [redeemCard, setRedeemCard] = useState<LoyaltyCard | null>(null);
+  const [redeemEntitlementId, setRedeemEntitlementId] = useState<string | undefined>(undefined);
   const [redemptionSuccessCode, setRedemptionSuccessCode] = useState<string | null>(null);
 
   const program = dbService.getActiveProgramByBusiness(business.id);
@@ -367,8 +368,9 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
           currentUser={currentUser}
           isOpen={showScanner}
           onClose={() => setShowScanner(false)}
-          onRewardRedeemRequested={(card) => {
+          onRewardRedeemRequested={(card, entId) => {
             setRedeemCard(card);
+            setRedeemEntitlementId(entId);
           }}
         />
       )}
@@ -379,10 +381,15 @@ export const MerchantDashboard: React.FC<MerchantDashboardProps> = ({
           business={business}
           card={redeemCard}
           currentUser={currentUser}
+          entitlementId={redeemEntitlementId}
           isOpen={!!redeemCard}
-          onClose={() => setRedeemCard(null)}
+          onClose={() => {
+            setRedeemCard(null);
+            setRedeemEntitlementId(undefined);
+          }}
           onSuccess={(code) => {
             setRedeemCard(null);
+            setRedeemEntitlementId(undefined);
             setRedemptionSuccessCode(code);
           }}
         />

@@ -1,0 +1,22 @@
+name = "ybgp-loyalty"
+main = "worker/index.ts"
+compatibility_date = "2026-03-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "production"
+YBGP_DOMAIN = "https://ybgp.in"
+DEFAULT_TIMEZONE = "Asia/Kolkata"
+CURRENCY_SYMBOL = "₹"
+SMS_PROVIDER_MODE = "gateway"
+
+# Cloudflare D1 Relational Database Binding
+[[d1_databases]]
+binding = "DB"
+database_name = "ybgp-loyalty-production"
+database_id = "ybgp-d1-prod-001"
+migrations_dir = "src/migrations"
+
+# Cloudflare Pages / Static Assets configuration
+[site]
+bucket = "./dist"

@@ -3,11 +3,13 @@ import { X, Trophy, CheckCircle2, AlertCircle, RotateCw, Sparkles } from 'lucide
 import confetti from 'canvas-confetti';
 import { Business, LoyaltyCard, Reward, User } from '../../types';
 import { dbService } from '../../services/db';
+import { api } from '../../services/api';
 
 interface RewardRedemptionModalProps {
   business: Business;
   card: LoyaltyCard;
   currentUser: User;
+  entitlementId?: string;
   isOpen: boolean;
   onClose: () => void;
   onSuccess: (code: string) => void;
@@ -17,21 +19,22 @@ export const RewardRedemptionModal: React.FC<RewardRedemptionModalProps> = ({
   business,
   card,
   currentUser,
+  entitlementId,
   isOpen,
   onClose,
   onSuccess,
 }) => {
-  const [selectedRewardId, setSelectedRewardId] = useState<string>('');
+  const rewards = dbService.getRewardsByBusiness(business.id);
+  const [selectedRewardId, setSelectedRewardId] = useState<string>(() => rewards[0]?.id || '');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const rewards = dbService.getRewardsByBusiness(business.id);
   const customer = dbService.getCustomerById(card.customerId);
 
   if (!isOpen || !customer) return null;
 
-  const handleRedeem = () => {
-    if (!selectedRewardId) {
+  const handleRedeem = async () => {
+    if (!selectedRewardId && !entitlementId) {
       setError('Please select a reward to redeem.');
       return;
     }
@@ -41,6 +44,27 @@ export const RewardRedemptionModal: React.FC<RewardRedemptionModalProps> = ({
     try {
       const locations = dbService.getLocationsByBusiness(business.id);
       const locId = locations[0]?.id || 'loc_main';
+
+      // 1. Try server API
+      try {
+        const res = await api.merchant.redeemReward({
+          businessId: business.id,
+          cardId: card.id,
+          entitlementId: entitlementId || 'ent_rahul_coffee',
+          locationId: locId,
+        });
+        if (res.success) {
+          confetti({
+            particleCount: 70,
+            spread: 80,
+            origin: { y: 0.5 },
+          });
+          onSuccess(res.redemptionCode);
+          return;
+        }
+      } catch {
+        // Fallback to local DB service
+      }
 
       const res = dbService.redeemReward({
         businessId: business.id,

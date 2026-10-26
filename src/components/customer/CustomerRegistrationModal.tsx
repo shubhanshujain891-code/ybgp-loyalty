@@ -3,6 +3,7 @@ import { X, ShieldCheck, ArrowRight, CheckCircle2, RotateCw, AlertCircle } from 
 import { Business, LoyaltyCard, LoyaltyCustomer } from '../../types';
 import { dbService, normalizeIndianPhone } from '../../services/db';
 import { smsService } from '../../services/sms';
+import { api } from '../../services/api';
 
 interface CustomerRegistrationModalProps {
   business: Business;
@@ -49,12 +50,17 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
 
     setLoading(true);
     try {
-      const result = await smsService.requestOtp(norm, business.name);
+      let result;
+      try {
+        result = await api.public.requestOtp(norm, business.id);
+      } catch {
+        result = await smsService.requestOtp(norm, business.name);
+      }
+
       if (result.success) {
         setSimulatedCode(result.simulatedOtp || null);
         setStep('otp');
         setResendCooldown(30);
-        // Start cooldown countdown
         const interval = setInterval(() => {
           setResendCooldown((prev) => {
             if (prev <= 1) {
@@ -85,6 +91,27 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
 
     setLoading(true);
     try {
+      try {
+        const res = await api.public.registerCustomer({
+          name: name.trim(),
+          phone,
+          otp: enteredOtp,
+          businessId: business.id,
+          serviceConsent: consent,
+        });
+
+        localStorage.setItem(`ybgp_cust_session_${business.id}`, res.sessionToken);
+        const cardToken = (res.card as any).qrToken || res.card.qrTokenRaw;
+        if (cardToken) {
+          localStorage.setItem(`ybgp_cust_token_${business.id}`, cardToken);
+        }
+
+        onSuccess(res.customer, res.card);
+        return;
+      } catch {
+        // Fallback to client service
+      }
+
       const verifyRes = await smsService.verifyOtp(phone, enteredOtp);
       if (!verifyRes.success) {
         setErrorMessage(verifyRes.message);
@@ -92,7 +119,6 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
         return;
       }
 
-      // Registration & Card Creation
       const { customer, card } = dbService.registerCustomer({
         businessId: business.id,
         name: name.trim(),
@@ -100,9 +126,7 @@ export const CustomerRegistrationModal: React.FC<CustomerRegistrationModalProps>
         consentGiven: consent,
       });
 
-      // Save customer token in session for instant recognition
       localStorage.setItem(`ybgp_cust_token_${business.id}`, card.qrTokenRaw);
-
       onSuccess(customer, card);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Registration failed';
