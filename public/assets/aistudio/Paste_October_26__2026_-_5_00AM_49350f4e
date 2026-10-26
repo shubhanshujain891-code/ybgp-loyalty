@@ -1,0 +1,872 @@
+# MASTER BUILD PROMPT: YBGP LOYALTY — PREMIUM DIGITAL STAMP & BUSINESS LINKS SAAS
+
+## ROLE & EXPECTATIONS
+
+Act as a principal software architect, senior full-stack developer, SaaS product manager, senior UI/UX designer, application security engineer, database architect, QA engineer, and DevOps engineer.
+
+Build a production-grade, premium multi-tenant SaaS platform under the YBGP brand for Indian local businesses.
+
+Product concept: **YBGP Loyalty — Digital Stamp Cards, QR Business Pages, Customer Engagement & Loyalty Management.**
+
+This is an implementation task, not just a design exercise. Inspect the existing repository, understand its architecture, plan the implementation, build working features, run tests, and document deployment.
+
+Do not create a static mockup or a frontend-only demo. All important workflows must be connected to a persistent backend with authorization, validation, and audit trails.
+
+---
+
+## 1. BRAND IDENTITY & PRODUCT POSITIONING
+
+Brand: YBGP — Your Business Growth Partner  
+Website: https://ybgp.in  
+Product: YBGP Loyalty  
+Product category: Digital loyalty, customer engagement, QR link hub, stamp cards, and small-business SaaS.
+
+Position the product as a premium, reliable, easy-to-use solution for Indian retailers, cafés, salons, bakeries, restaurants, sweet shops, gyms, service businesses, and neighborhood stores.
+
+Brand personality:
+- Premium, trustworthy, modern, and business-oriented.
+- Simple enough for a non-technical shopkeeper.
+- Professional enough for multi-outlet businesses.
+- Mobile-first and designed for daily use.
+- Fast, accessible, and lightweight on average Android devices.
+- Indian market ready, using INR, +91 mobile numbers, and Asia/Kolkata timezone defaults.
+
+Use the existing YBGP brand assets and design conventions where available. Do not invent company contact information, testimonials, client counts, or pricing claims.
+
+Use centralized configuration for YBGP logo, contact details, support links, domain, legal pages, plan prices, and brand colors.
+
+---
+
+## 2. FIRST ACTION: REPOSITORY AUDIT
+
+Before modifying files:
+
+1. Inspect the current repository, Git branch, recent commits, package files, application entry points, routes, components, database schema, migrations, environment configuration, and deployment files.
+2. Identify the existing stack and reusable UI components.
+3. Determine whether the project already uses Cloudflare Workers, D1, R2, Vite, React, TypeScript, Tailwind, or another framework.
+4. Inspect existing authentication, authorization, API conventions, error handling, logging, and tests.
+5. Identify existing features that must be preserved.
+6. Report architecture risks, security gaps, missing integrations, and implementation priorities.
+7. Produce a concise implementation plan with phases and acceptance criteria.
+
+Do not replace the current stack or rewrite working modules without a compelling reason. Never delete existing data, secrets, database bindings, migrations, or production configuration.
+
+If repository access is unavailable, request the repository contents rather than pretending the audit is complete.
+
+---
+
+## 3. RECOMMENDED ARCHITECTURE
+
+Prefer the following architecture when compatible with the existing project:
+
+- Frontend: React + TypeScript + Vite.
+- UI: Tailwind CSS with accessible, reusable components.
+- Backend: Cloudflare Workers with typed API handlers.
+- Database: Cloudflare D1 using explicit, versioned SQL migrations.
+- Object storage: Cloudflare R2 for uploaded logos and media when needed.
+- Routing: Existing router or React Router.
+- Validation: Zod or an equivalent shared validation layer.
+- Testing: Vitest, API integration tests, and browser-based end-to-end tests.
+- Deployment: Cloudflare Workers/Pages according to the existing deployment architecture.
+- Package management: Respect the existing lockfile and package manager.
+
+Do not introduce every suggested library automatically. Inspect existing dependencies and choose compatible solutions.
+
+Architecture requirements:
+- Clear frontend, API, database, authentication, and business-logic boundaries.
+- Server-side authorization for every protected operation.
+- Database transactions for stamp awards, redemption, and related state changes.
+- Structured error handling and request IDs.
+- Rate limiting on public registration and sensitive endpoints.
+- Server-side pagination, filtering, and search.
+- Idempotency protections for stamp-award requests.
+- Environment-specific configuration for development, staging, and production.
+- No secrets or service credentials in client-side code.
+- No hardcoded production identifiers.
+
+Use a modular monolith initially unless the existing application justifies a different approach.
+
+---
+
+## 4. MULTI-TENANT SAAS DATA MODEL
+
+Design and implement a relational schema with foreign keys, indexes, uniqueness constraints, appropriate deletion policies, timestamps, and versioned migrations.
+
+Core entities:
+
+1. users
+2. businesses
+3. business_memberships
+4. business_locations
+5. business_profiles
+6. business_links
+7. loyalty_programs
+8. loyalty_customers
+9. loyalty_cards
+10. stamp_transactions
+11. rewards
+12. reward_redemptions
+13. qr_codes
+14. campaigns
+15. subscription_plans
+16. subscriptions
+17. usage_counters
+18. audit_logs
+19. platform_settings
+20. support_tickets, where required
+
+Include any additional tables required for secure authentication, verification tokens, invitation workflows, notification preferences, and rate limiting.
+
+Data-model rules:
+
+- Every tenant-owned record must have a business/tenant association.
+- Enforce tenant ownership on the server for reads, writes, updates, exports, and deletions.
+- A business may have multiple staff members and locations.
+- A customer may participate in more than one business's loyalty program.
+- A customer's loyalty identity must be unique within the appropriate business/program scope.
+- Never use a customer's phone number, sequential database ID, or other predictable personal information as a public authentication credential.
+- Store customer identifiers as random, high-entropy opaque identifiers.
+- Store hashes of customer QR tokens, not reusable raw bearer tokens, where the design permits.
+- Maintain an append-only stamp transaction ledger.
+- Track reversals as new compensating transactions instead of silently rewriting historical transactions.
+- Store money as integer minor units (paise) or another consistently documented exact representation.
+- Use UTC timestamps in storage and Asia/Kolkata for business-facing display.
+
+Provide an ER diagram or equivalent schema documentation and explain the principal relationships.
+
+---
+
+## 5. THREE DISTINCT EXPERIENCES
+
+### A. PUBLIC CUSTOMER EXPERIENCE
+
+Create public pages that work without installing an app.
+
+Business URL format:
+`/b/{businessSlug}`
+
+The public page should display only the links and information selected by the shopkeeper.
+
+Possible blocks:
+- Business logo and cover image.
+- Business name and description.
+- Phone and WhatsApp contact.
+- Address and Google Maps directions.
+- Instagram, Facebook, YouTube, and other social links.
+- Google Reviews button.
+- Website and online ordering links.
+- Business hours.
+- Current offers and announcements.
+- Digital loyalty card.
+- Available rewards and reward progress.
+- Terms and privacy information.
+
+Features:
+- Responsive mobile-first design.
+- Fast initial loading.
+- Customizable block order, visibility, labels, and icons.
+- Brand color and button-style customization within safe limits.
+- Preview before publishing.
+- Copyable public URL and downloadable shop QR.
+- Share through WhatsApp and the native share sheet.
+- Clear empty states and friendly error messages.
+- No exposure of internal business IDs or customer records.
+
+Do not create fake Google review counts or ratings.
+
+The Google Reviews button must open the business's configured, verified review URL. Do not automatically write reviews, fabricate review activity, or gate the review link based on a customer's rating.
+
+### B. CUSTOMER REGISTRATION AND DIGITAL STAMP CARD
+
+Registration flow:
+
+1. Customer scans the shop's public QR code.
+2. Customer opens the business link page.
+3. Customer selects "Join Loyalty Program" or "Get My Stamp Card".
+4. Customer enters their name and Indian mobile number.
+5. Display the business's relevant consent and privacy information.
+6. Verify the mobile number through OTP before activating the customer account, if SMS verification is configured.
+7. Create the customer record and loyalty card.
+8. Display the customer's personal loyalty QR and digital stamp card.
+9. Let the customer save/bookmark the page or add it to their home screen.
+
+Important:
+- No customer password or traditional login should be required.
+- Use OTP or an equivalent secure, expiring verification mechanism for account recovery and sensitive account access.
+- Do not assume possession of a phone number based on form submission.
+- Do not allow arbitrary customers to open another customer's card using a guessable customer ID or phone number.
+- Provide a secure recovery mechanism that does not require the customer to remember a password.
+- Customer QR tokens must be random, revocable, and designed to avoid leaking personal information.
+- Do not expose mobile numbers in QR contents, URLs, or analytics events.
+- Support configurable OTP expiry, resend limits, rate limits, and abuse prevention.
+- If an SMS provider is not configured, implement a development-only mock verification provider and a clear production configuration error. Never silently bypass verification in production.
+
+Customer card should display:
+- Business branding.
+- Customer's chosen display name.
+- Current stamp count.
+- Target number of stamps.
+- Reward progress.
+- Available and redeemed rewards.
+- Customer QR for merchant scanning.
+- Program rules and expiry information, if applicable.
+- Last stamp date and recent activity.
+- A clear help/contact option.
+
+Make the card visually attractive, like a premium digital loyalty pass.
+
+### C. SHOPKEEPER DASHBOARD
+
+Create an authenticated, mobile-first merchant application.
+
+Merchant navigation:
+- Overview
+- Scan Customer
+- Customers
+- Loyalty Programs
+- Rewards
+- Business Page & Links
+- QR Codes
+- Campaigns
+- Analytics
+- Team & Locations
+- Subscription & Billing
+- Settings
+- Help & Support
+
+The main action should be prominently visible: "Scan Customer QR".
+
+---
+
+## 6. SHOPKEEPER QR SCANNING & STAMP AWARDING
+
+Implement the complete scan-to-stamp workflow.
+
+### Merchant scanning flow
+
+1. Shopkeeper signs in to the merchant dashboard.
+2. Selects the active business and location.
+3. Opens "Scan Customer QR".
+4. Browser requests camera permission.
+5. Scanner reads the customer's unique loyalty QR.
+6. Client sends the scanned token to the backend over HTTPS.
+7. Server authenticates the merchant and validates business membership, location permissions, customer identity, active loyalty program, and card status.
+8. Server displays the customer's relevant profile and current stamp count.
+9. Shopkeeper confirms the award.
+10. Backend validates eligibility and creates a stamp transaction.
+11. Updated stamp count and progress are returned.
+12. If the target is reached, the server creates or makes available the eligible reward according to the configured reward policy.
+13. Show a clear success or failure state.
+
+Requirements:
+- Use a maintained QR scanner library compatible with supported browsers.
+- Handle camera permission denial, unsupported devices, low light, and invalid codes.
+- Offer a manual recovery/search workflow for authorized merchants.
+- Use a cooldown and duplicate-submission protection.
+- Prevent accidental double awards with server-side idempotency keys.
+- Apply configurable daily limits and velocity checks where appropriate.
+- Require an explicit confirmation before awarding a stamp.
+- Display the customer's first name or another minimal identifier before confirmation.
+- Never let a public endpoint award stamps.
+- Do not trust a stamp count or business ID supplied by the browser.
+- Never treat possession of a scanned customer QR as sufficient merchant authorization.
+- Record the authenticated staff member, business, location, timestamp, transaction ID, and reason for each award.
+- Support authorized reversals with mandatory reasons and a full audit trail.
+
+Do not require customer scanning to award stamps. The normal flow is merchant scans customer card.
+
+---
+
+## 7. LOYALTY PROGRAM BUILDER
+
+Let the shopkeeper create and manage a configurable loyalty program.
+
+Example:
+"Collect 9 stamps and get 1 eligible reward."
+
+Program settings:
+- Program name and description.
+- Active/inactive status.
+- Required stamps per reward.
+- Reward title and description.
+- Reward availability and redemption rules.
+- Optional start and end dates.
+- Optional eligible products or minimum purchase amount.
+- Optional per-customer and per-day award limits.
+- Optional stamp expiry and program expiry.
+- Terms and conditions.
+- Location eligibility.
+- Redemption confirmation policy.
+
+Allow sensible defaults so a new shopkeeper can launch a basic program in minutes.
+
+Requirements:
+- Validate program settings on the server.
+- Define behavior when a program changes while customers have existing stamps.
+- Preserve historical transactions.
+- Prevent retroactive stamp manipulation.
+- Support multiple programs only where permitted by the subscription plan.
+- Clearly communicate reward eligibility to both merchant and customer.
+
+---
+
+## 8. REWARD REDEMPTION
+
+Build a secure reward-redemption workflow.
+
+1. Customer reaches the required stamp threshold.
+2. System creates an eligible reward entitlement.
+3. Merchant opens the customer's card or scans the customer QR.
+4. Dashboard displays available rewards.
+5. Merchant selects the intended reward.
+6. Server validates the entitlement and merchant permissions.
+7. Merchant confirms redemption.
+8. Backend performs an atomic redemption operation.
+9. Reward is marked redeemed and cannot be redeemed again.
+10. Both merchant and customer receive confirmation.
+
+Use database transactions or equivalent concurrency controls to prevent double redemption, including simultaneous requests from multiple staff members.
+
+Maintain a complete redemption ledger with timestamps, staff identity, location, reward, and transaction status.
+
+Do not automatically remove or reset stamps unless the program's explicitly configured reward policy requires it.
+
+---
+
+## 9. BUSINESS PAGE & LINK MANAGEMENT
+
+Build a visual link-page editor similar to a premium link-in-bio builder, but focused on local businesses.
+
+Features:
+- Add, edit, delete, reorder, hide, and show links.
+- Drag-and-drop ordering where practical.
+- Custom labels and icons.
+- Link validation and safe URL handling.
+- Preview on mobile and desktop.
+- Save drafts and publish changes.
+- Upload business logo and optional cover image.
+- Set contact details, business hours, address, and map link.
+- Set the Google Reviews URL.
+- Configure WhatsApp click-to-chat links.
+- Add Instagram and other social profiles.
+- Enable or disable the loyalty card section.
+- Generate and regenerate the shop QR code.
+- Download QR as SVG and high-resolution PNG.
+- Print-ready QR poster or counter standee with optional YBGP branding.
+- Add campaign source tags and UTM parameters when appropriate.
+
+A business must not be able to publish JavaScript, arbitrary HTML, unsafe redirects, or scripts through custom link fields.
+
+The shop QR must remain stable across ordinary content edits. If the underlying destination changes, support redirects or a stable route so already printed codes continue working.
+
+---
+
+## 10. PREMIUM YBGP SUPER ADMIN DASHBOARD
+
+Create a separate, strongly protected platform administration interface.
+
+Only authorized YBGP platform administrators may access it.
+
+Dashboard modules:
+
+### Platform overview
+- Total registered businesses.
+- Active and suspended businesses.
+- Total registered loyalty customers.
+- Stamps awarded.
+- Rewards issued and redeemed.
+- Active subscriptions.
+- Trial accounts.
+- Subscription revenue and billing status.
+- Usage by date range.
+- Recent platform activity.
+
+Clearly distinguish actual revenue, projected revenue, and unpaid invoices. Do not invent metrics.
+
+### Business management
+- Search and filter businesses.
+- View business profile and subscription.
+- Review onboarding status.
+- Suspend or reactivate accounts with a recorded reason.
+- Review usage and feature entitlements.
+- Manage support cases.
+- Inspect audit logs.
+- Support controlled administrative assistance with full audit logging.
+
+### Plans and billing
+- Create and edit plans.
+- Define feature entitlements and usage limits.
+- Manage trial length and account status.
+- View invoices, payment status, and billing history.
+- Integrate a payment provider only after credentials and webhooks are configured.
+- Validate webhook signatures and enforce idempotency.
+- Never store card data directly.
+
+### Platform settings
+- YBGP branding.
+- Public website and support details.
+- Terms, privacy policy, and legal links.
+- Email/SMS provider configuration status.
+- Default plan configuration.
+- Feature flags.
+- Maintenance and incident notices.
+- Audit and security controls.
+
+Do not allow ordinary business owners to access super admin routes by changing a URL or editing client-side state.
+
+Use separate server-side permissions for platform administrators.
+
+---
+
+## 11. SUBSCRIPTION AND PRICING ENGINE
+
+Create a configurable subscription system. Do not hardcode final commercial pricing.
+
+Support:
+- Free trial.
+- Free or starter plan, if enabled.
+- Paid monthly and annual plans.
+- Plan upgrades and downgrades.
+- Usage limits and feature entitlements.
+- Subscription expiry and grace periods.
+- Billing status and invoice history.
+- Cancellation and renewal.
+- Payment failures and retry states.
+- Administrative comping and controlled plan overrides.
+
+Potential configurable limits:
+- Number of business locations.
+- Staff seats.
+- Active loyalty programs.
+- Monthly stamp transactions.
+- Registered customers.
+- Custom branding.
+- Analytics retention.
+- Campaign features.
+- Export permissions.
+
+Enforce entitlements in the backend. Hiding a frontend button is not sufficient.
+
+If a payment gateway is not configured, display a clear unavailable state and allow safe administrative testing. Do not simulate successful real payments in production.
+
+---
+
+## 12. ANALYTICS AND REPORTING
+
+Merchant dashboard:
+- New customers by day, week, and month.
+- Total and active customers.
+- Returning customers.
+- Stamps awarded by period.
+- Rewards earned and redeemed.
+- Reward redemption rate.
+- Link clicks and QR visits.
+- Registration conversion rate.
+- Campaign performance.
+- Location and staff performance, subject to permissions.
+
+YBGP platform analytics:
+- Business onboarding funnel.
+- Active businesses.
+- Customer registrations.
+- Stamp and redemption volume.
+- Subscription and revenue reports.
+- Feature adoption.
+- Churn and retention metrics where data supports them.
+
+Use date filters, charts, accessible tables, and CSV export where permitted.
+
+Define every metric precisely. Avoid presenting QR visits as unique customers unless the measurement actually supports that claim.
+
+Use privacy-conscious analytics. Never send customer mobile numbers, raw QR tokens, or authentication secrets to analytics providers.
+
+---
+
+## 13. PREMIUM UI/UX DIRECTION
+
+Create a cohesive, production-quality interface rather than a generic admin template.
+
+Visual direction:
+- Premium, modern SaaS aesthetic.
+- Restrained YBGP brand palette, using existing brand assets where available.
+- High-quality typography and consistent spacing.
+- Subtle borders, refined shadows, polished cards, and restrained animation.
+- Strong contrast and clear information hierarchy.
+- Clean data tables and useful empty states.
+- Skeleton loading and responsive error states.
+- Accessible controls and keyboard navigation.
+- Clear focus indicators and reduced-motion support.
+- Responsive layouts for Android, iPhone, tablets, and desktop.
+- Consistent light/dark theme support only if it can be implemented properly.
+
+Merchant UX:
+- Put Scan Customer QR at the center of the primary workflow.
+- Use large tap targets and readable labels.
+- Avoid excessive charts and unnecessary configuration.
+- Keep common tasks within a few taps.
+- Provide plain-language Hindi-ready interface architecture, with English as the initial default.
+- Provide confirmation, success, warning, and error feedback.
+
+Customer UX:
+- No unnecessary navigation.
+- No forced app installation.
+- No password requirement.
+- Fast, mobile-friendly registration.
+- Beautiful stamp progress visualization.
+- Easy access to rewards, business contact, and Google Reviews.
+
+Use reusable design tokens and shared components. Avoid hardcoded styles scattered across the application.
+
+Build polished loading, empty, offline, expired-card, suspended-program, and permission-denied states.
+
+---
+
+## 14. AUTHENTICATION AND AUTHORIZATION
+
+Implement secure merchant authentication.
+
+- Secure sign-in and sign-out.
+- Account recovery.
+- Business membership and role-based access control.
+- Owner, manager, cashier, and platform administrator roles.
+- Invitation and staff revocation workflows.
+- Secure session lifecycle and expiry.
+- Protection against brute-force login attempts.
+- Rate limiting for login, registration, OTP, and scanning endpoints.
+- Session invalidation after account suspension or staff removal where required.
+- Strong password hashing if password authentication is used.
+- Secure cookies, CSRF protections where applicable, and appropriate security headers.
+- Authorization checks on the server for every protected operation.
+
+Role examples:
+- Owner: manage business, billing, team, and all permitted features.
+- Manager: manage customers, loyalty, links, and reporting.
+- Cashier: scan customers, award stamps, and redeem authorized rewards.
+- Platform admin: manage the SaaS platform through a separate permission scope.
+
+A cashier must not be able to change billing, transfer ownership, export all customer data, or modify platform settings.
+
+Never trust role information supplied by the frontend.
+
+---
+
+## 15. PRIVACY, COMPLIANCE, AND ABUSE PREVENTION
+
+Implement privacy-conscious handling of customer information.
+
+- Collect only necessary personal data.
+- Explain the purpose of collecting the customer's name and mobile number.
+- Provide clear privacy notices and consent where required.
+- Separate essential service communications from optional marketing consent.
+- Do not automatically subscribe customers to promotional WhatsApp messages.
+- Support customer access, correction, and deletion requests subject to applicable legal retention requirements.
+- Define retention and deletion policies.
+- Restrict customer data access by tenant and role.
+- Avoid exposing personal information in logs.
+- Encrypt traffic in transit and use appropriate protections for stored secrets.
+- Validate and normalize mobile numbers.
+- Apply rate limits and abuse detection.
+- Prevent QR enumeration, replay, duplicate awards, and unauthorized redemptions.
+- Document applicable Indian privacy and consumer compliance requirements, including the DPDP framework and relevant rules in force at launch.
+
+Do not claim legal compliance solely because these controls exist. Document any remaining compliance work.
+
+---
+
+## 16. PERFORMANCE, SEO, AND ACCESSIBILITY
+
+Public business pages:
+- Descriptive page titles and metadata.
+- Appropriate social-sharing previews.
+- Canonical URLs.
+- Sitemap and robots configuration for eligible public pages.
+- No indexing of private dashboards or customer-specific card pages.
+- Avoid exposing personal details through metadata or previews.
+- Optimize images and avoid unnecessary JavaScript.
+- Add appropriate caching for public content while preventing private data caching.
+
+Application:
+- Use pagination for large datasets.
+- Add indexes based on actual query patterns.
+- Avoid N+1 database requests.
+- Provide useful loading and retry states.
+- Ensure proper contrast and keyboard usability.
+- Target WCAG 2.2 AA where practical.
+- Set documented performance budgets and measure representative mobile performance.
+
+Do not cache authenticated customer records or sensitive API responses publicly.
+
+---
+
+## 17. API DESIGN
+
+Build versioned, documented APIs for all major operations.
+
+Suggested endpoint groups:
+
+Authentication:
+- POST /api/v1/auth/login
+- POST /api/v1/auth/logout
+- POST /api/v1/auth/recover
+- GET /api/v1/auth/session
+
+Public business pages:
+- GET /api/v1/public/business/:slug
+- GET /api/v1/public/business/:slug/links
+
+Customer loyalty:
+- POST /api/v1/public/loyalty/register
+- POST /api/v1/public/loyalty/verify-otp
+- GET /api/v1/customer/card
+- GET /api/v1/customer/rewards
+
+Merchant scanning:
+- POST /api/v1/merchant/scan/resolve
+- POST /api/v1/merchant/stamps/award
+- POST /api/v1/merchant/rewards/redeem
+- POST /api/v1/merchant/stamps/reverse
+
+Business management:
+- GET /api/v1/merchant/dashboard
+- GET /api/v1/merchant/customers
+- GET /api/v1/merchant/transactions
+- CRUD /api/v1/merchant/links
+- CRUD /api/v1/merchant/programs
+- CRUD /api/v1/merchant/rewards
+- CRUD /api/v1/merchant/locations
+
+Platform administration:
+- GET /api/v1/admin/overview
+- CRUD /api/v1/admin/businesses
+- CRUD /api/v1/admin/plans
+- GET /api/v1/admin/audit-logs
+
+These are logical examples, not mandatory exact routes. Adapt them to the existing architecture and conventions.
+
+Requirements:
+- Validate every request and response.
+- Return consistent error formats and HTTP status codes.
+- Use cursor pagination or appropriate bounded pagination.
+- Apply authorization and tenant scoping.
+- Rate-limit sensitive endpoints.
+- Use idempotency keys for financially or operationally sensitive mutations.
+- Never expose database stack traces or secrets.
+- Document the API contract.
+
+---
+
+## 18. TESTING AND QUALITY GATES
+
+Implement automated tests for:
+
+Authentication:
+- Valid and invalid login.
+- Expired sessions.
+- Revoked membership.
+- Unauthorized platform access.
+
+Tenant isolation:
+- Business A cannot access Business B's customers.
+- Business A cannot award stamps to Business B's customers.
+- Cross-tenant transaction IDs cannot be used to modify records.
+
+Registration:
+- Valid and invalid phone numbers.
+- Duplicate registration behavior.
+- OTP expiration and resend limits.
+- Abuse and rate limiting.
+- Secure account recovery.
+
+Loyalty:
+- Correct stamp award.
+- Duplicate request protection.
+- Threshold and reward generation.
+- Stamp reversal.
+- Program changes with existing cards.
+- Expired or inactive programs.
+
+Redemption:
+- Valid redemption.
+- Duplicate redemption prevention.
+- Concurrent redemption attempts.
+- Unauthorized cashier operations.
+
+QR:
+- Valid, invalid, expired, and revoked tokens.
+- No personal information in QR payloads.
+- Unauthorized merchant scanning.
+
+Subscriptions:
+- Plan entitlement enforcement.
+- Usage limit enforcement.
+- Expired subscriptions.
+- Payment webhook idempotency.
+
+Frontend:
+- Registration flow.
+- Merchant scan flow.
+- Stamp award confirmation.
+- Reward redemption.
+- Business link editor.
+- Responsive mobile layouts.
+
+Use unit tests, database/API integration tests, and end-to-end tests. Add realistic test fixtures without real customer personal information.
+
+Before declaring completion, run the available build, type-check, lint, migrations, and tests. Report any checks that could not be executed.
+
+---
+
+## 19. DEPLOYMENT AND OPERATIONS
+
+For Cloudflare deployments, where applicable:
+
+- Preserve and review wrangler configuration.
+- Use separate development, staging, and production environments.
+- Maintain versioned D1 migrations.
+- Test migrations against representative data.
+- Use R2 for appropriate media assets.
+- Configure secrets through secure environment configuration.
+- Configure production domains and HTTPS.
+- Implement error monitoring and structured logs.
+- Add health checks and operational documentation.
+- Define backup, recovery, and rollback procedures appropriate to the deployment.
+- Document SMS, email, payment, and other provider setup.
+- Keep production credentials out of Git.
+- Never run destructive migrations against production without explicit approval and a verified recovery plan.
+
+Provide:
+1. Local setup instructions.
+2. Environment variable documentation.
+3. Database initialization instructions.
+4. Migration and seed commands.
+5. Staging deployment instructions.
+6. Production deployment checklist.
+7. Rollback and troubleshooting guide.
+
+---
+
+## 20. IMPLEMENTATION PHASES
+
+Build incrementally and keep the application runnable after each phase.
+
+Phase 1 — Audit and foundation:
+- Inspect repository.
+- Document architecture.
+- Establish design system.
+- Create safe migrations.
+- Implement authentication, tenancy, and roles.
+
+Phase 2 — Business onboarding:
+- Business profile.
+- Public business slug.
+- Link management.
+- Shop QR generation.
+- Customer-facing business page.
+
+Phase 3 — Customer loyalty:
+- Registration and phone verification.
+- Customer identity.
+- Secure loyalty QR.
+- Digital stamp card.
+- Loyalty program and reward configuration.
+
+Phase 4 — Merchant operations:
+- QR scanning.
+- Customer lookup.
+- Stamp award ledger.
+- Reward redemption.
+- Reversal and audit workflows.
+
+Phase 5 — SaaS administration:
+- YBGP super admin.
+- Business management.
+- Subscription plans and entitlements.
+- Usage monitoring.
+- Support and audit tools.
+
+Phase 6 — Analytics and polish:
+- Dashboards.
+- Reports and exports.
+- Performance optimization.
+- SEO.
+- Responsive and accessible UI.
+
+Phase 7 — Production readiness:
+- Security review.
+- Automated tests.
+- Migration verification.
+- Deployment configuration.
+- Documentation.
+- Release checklist.
+
+Do not implement all phases in one uncontrolled code-generation operation. Complete, validate, and document each logical phase before continuing.
+
+---
+
+## 21. DEFINITION OF DONE
+
+The product is not complete until these end-to-end scenarios work:
+
+SCENARIO A — SHOP ONBOARDING
+A YBGP administrator can provision a business. The owner can configure its profile, links, Google Reviews destination, and loyalty rules. The system generates a stable public QR.
+
+SCENARIO B — CUSTOMER REGISTRATION
+A new customer scans the shop QR, registers with their name and mobile number, completes configured verification, and receives a private digital stamp card.
+
+SCENARIO C — AWARD STAMP
+An authenticated cashier opens the scanner, scans the customer's card, sees the correct customer and progress, confirms the award, and receives a server-confirmed success response.
+
+SCENARIO D — REWARD
+When the threshold is reached, the correct reward becomes available. The cashier redeems it exactly once, and the customer sees the updated status.
+
+SCENARIO E — TENANT SECURITY
+A cashier from one business cannot access another business's customers, transactions, rewards, or administrative settings.
+
+SCENARIO F — YBGP CONTROL
+An authorized platform administrator can inspect business status, subscription entitlements, platform usage, and audit records without exposing customer secrets.
+
+SCENARIO G — FAILURE RECOVERY
+Invalid QR tokens, network failures, repeated requests, expired cards, missing permissions, and failed database operations produce safe, understandable responses without corrupting balances.
+
+SCENARIO H — DEPLOYMENT
+A clean environment can be initialized, migrated, seeded with safe demo data, tested, and deployed using the documented procedure.
+
+---
+
+## 22. REQUIRED DELIVERABLES
+
+Produce:
+- Working full-stack application.
+- Premium responsive UI.
+- Public business link page.
+- Customer registration and digital loyalty card.
+- Merchant QR scanner and stamp management.
+- Reward and redemption workflows.
+- YBGP super admin dashboard.
+- Database migrations and schema documentation.
+- Authentication and role-based authorization.
+- API documentation.
+- Automated tests.
+- Environment configuration example without secrets.
+- Local setup and deployment guide.
+- Security and privacy checklist.
+- Final implementation report.
+
+The final report must state:
+- What was implemented.
+- What was tested.
+- Which commands passed or failed.
+- Which integrations require credentials.
+- Which migrations are pending.
+- Known limitations and remaining production risks.
+- Exact steps needed to deploy safely.
+
+Do not claim a feature works unless it has actually been implemented and verified.
+
+## FINAL INSTRUCTION
+
+Start by auditing the existing repository. Present the architecture findings and phased implementation plan, then proceed to implement the first safe phase.
+
+Prioritize correctness, tenant isolation, fraud prevention, customer privacy, reliable stamp transactions, merchant usability, and maintainability over superficial visual effects.
+
+Build YBGP Loyalty as a real SaaS product that can grow from a single neighborhood shop to thousands of businesses without compromising security or data integrity.

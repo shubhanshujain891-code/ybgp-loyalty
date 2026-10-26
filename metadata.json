@@ -1,0 +1,6 @@
+{
+  "name": "YBGP Loyalty - Digital Stamp Cards & QR Hub",
+  "description": "Production-grade multi-tenant loyalty platform, digital stamp cards, and QR link hubs for Indian local businesses by Your Business Growth Partner.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
